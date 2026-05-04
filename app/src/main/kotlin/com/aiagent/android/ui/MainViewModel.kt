@@ -451,7 +451,7 @@ data class UiState(
     val apiKey: String = "",
     val baseUrl: String = "",
     val model: String = "",
-    val maxSteps: Int = 20,
+    val maxSteps: Int = 10_000,
     val temperature: Float = 0.2f,
     val maxTokens: Int = 2048,
     val reasoningEffort: String = "low",

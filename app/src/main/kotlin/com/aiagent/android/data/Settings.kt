@@ -9,6 +9,19 @@ class Settings(context: Context) {
     private val prefs: SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
+    init {
+        // One-shot migration: builds prior to v3 shipped with maxSteps default = 20. The
+        // user explicitly asked for ≥ 10000. Bump any persisted value that's still at the
+        // old default (or any small value) so they don't have to re-set it after upgrade.
+        if (!prefs.getBoolean(KEY_MIGRATED_MAX_STEPS_V3, false)) {
+            val current = prefs.getInt(KEY_MAX_STEPS, DEFAULT_MAX_STEPS)
+            prefs.edit {
+                if (current < 100) putInt(KEY_MAX_STEPS, DEFAULT_MAX_STEPS)
+                putBoolean(KEY_MIGRATED_MAX_STEPS_V3, true)
+            }
+        }
+    }
+
     var apiKey: String
         get() = prefs.getString(KEY_API, "") ?: ""
         set(value) = prefs.edit { putString(KEY_API, value) }
@@ -109,7 +122,7 @@ class Settings(context: Context) {
         const val PREFS_NAME = "agent_prefs"
         const val DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
         const val DEFAULT_MODEL = "openai/gpt-oss-120b"
-        const val DEFAULT_MAX_STEPS = 20
+        const val DEFAULT_MAX_STEPS = 10_000
         const val DEFAULT_TEMPERATURE = 0.2f
         const val DEFAULT_MAX_TOKENS = 2048
         const val DEFAULT_REASONING_EFFORT = "low"
@@ -130,6 +143,7 @@ class Settings(context: Context) {
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_MODEL = "model"
         private const val KEY_MAX_STEPS = "max_steps"
+        private const val KEY_MIGRATED_MAX_STEPS_V3 = "migrated_max_steps_v3"
         private const val KEY_TEMPERATURE = "temperature"
         private const val KEY_MAX_TOKENS = "max_tokens"
         private const val KEY_REASONING_EFFORT = "reasoning_effort"

@@ -592,8 +592,8 @@ fun SettingsTab(
         Text("Агент", style = MaterialTheme.typography.titleMedium)
         OutlinedTextField(
             value = state.maxSteps.toString(),
-            onValueChange = { onMaxSteps(it.toIntOrNull()?.coerceIn(1, 200) ?: state.maxSteps) },
-            label = { Text("Максимум шагов за запуск") },
+            onValueChange = { onMaxSteps(it.toIntOrNull()?.coerceIn(1, 100_000) ?: state.maxSteps) },
+            label = { Text("Максимум шагов за запуск (1 – 100000)") },
             modifier = Modifier.fillMaxWidth(),
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             singleLine = true,
