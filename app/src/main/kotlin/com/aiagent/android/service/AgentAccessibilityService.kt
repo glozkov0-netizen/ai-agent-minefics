@@ -195,18 +195,18 @@ class AgentAccessibilityService : AccessibilityService() {
      */
     private fun setOrPasteText(node: AccessibilityNodeInfo, text: String): Boolean {
         // Strategy 1: ACTION_SET_TEXT replaces the full text content.
+        // We trust the platform's return value here. Reading back node.text after the call
+        // frequently returns stale data (the node info object is a snapshot taken before the
+        // edit was applied), which used to make us run the clipboard-paste fallback as well
+        // and end up with the text inserted twice.
         val args = Bundle().apply {
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
         val setOk = runCatching { node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args) }
             .getOrDefault(false)
-        if (setOk) {
-            // Verify by reading the node text back; some implementations return true but ignore.
-            val current = node.text?.toString() ?: ""
-            if (current.contains(text) || current == text) return true
-            // Otherwise fall through to clipboard fallback.
-        }
-        // Strategy 2: clipboard paste.
+        if (setOk) return true
+        // Strategy 2: clipboard paste — used only when SET_TEXT actually refused (Compose
+        // TextField, WebView inputs, custom IME-only fields).
         return pasteViaClipboard(node, text)
     }
 

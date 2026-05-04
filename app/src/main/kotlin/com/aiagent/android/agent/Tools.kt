@@ -40,6 +40,11 @@ object Tools {
         Tool(function = deleteFile),
         Tool(function = startScreenRecording),
         Tool(function = stopScreenRecording),
+        Tool(function = listApps),
+        Tool(function = getClipboard),
+        Tool(function = setClipboard),
+        Tool(function = setVolume),
+        Tool(function = setBrightness),
         Tool(function = done),
     )
 
@@ -382,6 +387,93 @@ object Tools {
         description = "Stop the current screen recording and finalize the MP4 file. Returns the path " +
             "to the saved video. Safe to call even if no recording is in progress.",
         parameters = obj { put("type", "object"); putJsonObject("properties") {} },
+    )
+
+    private val listApps = FunctionDef(
+        name = "list_apps",
+        description = "List installed applications on the device. By default returns only apps " +
+            "that have a launcher icon (apps the user can actually open from the home screen). " +
+            "Set include_system=true to also return system apps without launcher icons (kernel " +
+            "services, providers, etc.). Each entry is `display_name | package | launchable`.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("include_system") {
+                    put("type", "boolean")
+                    put("description", "Include all installed packages, not just launchable ones. " +
+                        "Default false.")
+                }
+                putJsonObject("filter") {
+                    put("type", "string")
+                    put("description", "Optional case-insensitive substring filter applied to the " +
+                        "display name AND the package name.")
+                }
+            }
+        },
+    )
+
+    private val getClipboard = FunctionDef(
+        name = "get_clipboard",
+        description = "Read the current text content of the system clipboard. Returns an empty " +
+            "string if the clipboard is empty or contains non-text data.",
+        parameters = obj { put("type", "object"); putJsonObject("properties") {} },
+    )
+
+    private val setClipboard = FunctionDef(
+        name = "set_clipboard",
+        description = "Replace the system clipboard with the given text. Useful to make data " +
+            "available to other apps via paste.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("text") { put("type", "string") }
+            }
+            put("required", arr("text"))
+        },
+    )
+
+    private val setVolume = FunctionDef(
+        name = "set_volume",
+        description = "Change the device volume for one stream. `stream` is one of: music, ring, " +
+            "notification, alarm, voice_call, system. `level` is an integer 0..max where max is " +
+            "stream-specific. Alternatively pass `relative` (-100..+100) as a percentage delta.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("stream") {
+                    put("type", "string")
+                    put("description", "music | ring | notification | alarm | voice_call | system. " +
+                        "Default: music.")
+                }
+                putJsonObject("level") {
+                    put("type", "integer")
+                    put("description", "Absolute level (0..max for the stream). Mutually exclusive " +
+                        "with `relative`.")
+                }
+                putJsonObject("relative") {
+                    put("type", "integer")
+                    put("description", "Percentage delta -100..+100. Mutually exclusive with `level`.")
+                }
+            }
+        },
+    )
+
+    private val setBrightness = FunctionDef(
+        name = "set_brightness",
+        description = "Change the screen brightness for the current activity (0..100 percent). " +
+            "Note: this only affects this app while it is in the foreground; when overlay is " +
+            "shown, also adjusts the overlay window. Cannot change global system brightness " +
+            "without WRITE_SETTINGS — that path is not used.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("level") {
+                    put("type", "integer")
+                    put("description", "0 = dimmest, 100 = brightest. -1 = follow system.")
+                }
+            }
+            put("required", arr("level"))
+        },
     )
 
     private val done = FunctionDef(

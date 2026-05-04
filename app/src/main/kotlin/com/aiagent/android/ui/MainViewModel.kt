@@ -160,6 +160,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun removeAllowedFolder(uri: String) {
         val newSet = settings.allowedFolders - uri
         settings.allowedFolders = newSet
+        // Also tell Android to forget the persistable URI grant so the agent can no longer access
+        // this folder even if it remembered the URI from somewhere.
+        runCatching {
+            getApplication<Application>().contentResolver.releasePersistableUriPermission(
+                Uri.parse(uri),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }
         _state.update { it.copy(allowedFolders = newSet.toList()) }
     }
 

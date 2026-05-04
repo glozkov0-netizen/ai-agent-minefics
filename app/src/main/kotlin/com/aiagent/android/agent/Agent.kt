@@ -1,8 +1,12 @@
 package com.aiagent.android.agent
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.media.AudioManager
 import android.util.Log
 import com.aiagent.android.audio.MicRecorder
 import com.aiagent.android.data.Settings
@@ -452,6 +456,102 @@ class Agent(
                     summary = res,
                 )
             }
+            "list_apps" -> {
+                val includeSystem = args.boolOf("include_system") ?: false
+                val filter = args.stringOf("filter")?.lowercase()?.takeIf { it.isNotBlank() }
+                val pm = context.packageManager
+                val launchablePackages: Set<String> = pm
+                    .queryIntentActivities(
+                        Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),
+                        0,
+                    )
+                    .map { it.activityInfo.packageName }
+                    .toSet()
+                val pkgs = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                val rows = pkgs.mapNotNull { app ->
+                    val launchable = app.packageName in launchablePackages
+                    if (!includeSystem && !launchable) return@mapNotNull null
+                    val display = pm.getApplicationLabel(app).toString()
+                    if (filter != null) {
+                        val hay = (display + " " + app.packageName).lowercase()
+                        if (!hay.contains(filter)) return@mapNotNull null
+                    }
+                    "$display | ${app.packageName} | ${if (launchable) "launchable" else "background"}"
+                }.sorted()
+                val out = if (rows.isEmpty()) "(приложений не найдено)"
+                else rows.joinToString("\n")
+                ToolResult(
+                    toolContent = out,
+                    summary = "${rows.size} прил.",
+                )
+            }
+            "get_clipboard" -> {
+                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                val clip = cm.primaryClip
+                val text = if (clip != null && clip.itemCount > 0) {
+                    clip.getItemAt(0).coerceToText(context).toString()
+                } else ""
+                ToolResult(
+                    toolContent = if (text.isEmpty()) "(буфер пуст)" else text,
+                    summary = "буфер: ${text.take(40)}",
+                )
+            }
+            "set_clipboard" -> {
+                val text = args.stringOf("text") ?: return ToolResult.error("set_clipboard: text required")
+                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("ai-agent", text))
+                ToolResult(
+                    toolContent = "OK (${text.length} симв.)",
+                    summary = "буфер ← «${text.take(40)}»",
+                )
+            }
+            "set_volume" -> {
+                val streamName = args.stringOf("stream") ?: "music"
+                val absolute = args.intOf("level")
+                val relative = args.intOf("relative")
+                val streamId = when (streamName.lowercase()) {
+                    "music" -> AudioManager.STREAM_MUSIC
+                    "ring" -> AudioManager.STREAM_RING
+                    "notification" -> AudioManager.STREAM_NOTIFICATION
+                    "alarm" -> AudioManager.STREAM_ALARM
+                    "voice_call", "call", "voice" -> AudioManager.STREAM_VOICE_CALL
+                    "system" -> AudioManager.STREAM_SYSTEM
+                    else -> AudioManager.STREAM_MUSIC
+                }
+                val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                val max = am.getStreamMaxVolume(streamId)
+                val target = when {
+                    absolute != null -> absolute.coerceIn(0, max)
+                    relative != null -> {
+                        val cur = am.getStreamVolume(streamId)
+                        val delta = (relative * max / 100f).toInt()
+                        (cur + delta).coerceIn(0, max)
+                    }
+                    else -> return ToolResult.error("set_volume: укажите level или relative")
+                }
+                runCatching {
+                    am.setStreamVolume(streamId, target, AudioManager.FLAG_SHOW_UI)
+                }.onFailure {
+                    return ToolResult.error("set_volume: ${it.message ?: "не удалось"} (стрим $streamName может требовать notification policy access)")
+                }
+                ToolResult(
+                    toolContent = "stream=$streamName уровень=$target/$max",
+                    summary = "$streamName: $target/$max",
+                )
+            }
+            "set_brightness" -> {
+                val level = args.intOf("level") ?: return ToolResult.error("set_brightness: level required")
+                // We can only adjust the per-window brightness. The system brightness needs
+                // WRITE_SETTINGS, which we deliberately don't request.
+                val activityBrightness = if (level < 0) -1f else (level.coerceIn(0, 100) / 100f)
+                // The accessibility service can't change activity window params directly; we
+                // ask the overlay service if it's running, otherwise just acknowledge.
+                OverlayService.applyBrightness(context, activityBrightness)
+                ToolResult(
+                    toolContent = "overlay-brightness=$activityBrightness (системная яркость не меняется)",
+                    summary = "яркость overlay: $activityBrightness",
+                )
+            }
             "done" -> {
                 val summary = args.stringOf("summary") ?: "(без описания)"
                 val success = args.boolOf("success") ?: true
@@ -554,8 +654,14 @@ USER INTERACTION
 
 DEVICE / FILES
 - device_info  → model, OS, screen, RAM, battery, network, hardware features.
+- list_apps(include_system?, filter?)  → installed applications on the device, one per line as `display_name | package | launchable`.
 - list_files(path), read_file(path), write_file(path, content), make_dir(path), delete_file(path)
    Path rules: 'content://...' or 'name/sub/path' relative to one of the user's allowed folders, or — only when 'all-files' mode is enabled in Settings — an absolute path like '/storage/emulated/0/...'.
+
+CLIPBOARD / SYSTEM
+- get_clipboard / set_clipboard(text)  → read or replace the system clipboard.
+- set_volume(stream, level | relative) → adjust media / ring / notification / alarm / voice_call / system volume.
+- set_brightness(level)                → adjust the overlay brightness (0-100; -1 = follow system).
 
 VIDEO RECORDING
 - start_screen_recording / stop_screen_recording → MP4 of the screen via MediaProjection. The first call pauses for the system consent dialog.

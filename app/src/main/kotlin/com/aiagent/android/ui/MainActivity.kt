@@ -132,7 +132,25 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestMicPermission() {
-        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        // If already granted, the only way to revoke is to send the user to the app permissions
+        // page. If not granted, ask the system for it.
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            openAppPermissionsPage()
+        } else {
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    private fun openAppPermissionsPage() {
+        val intent = Intent(
+            AndroidSettings.ACTION_APPLICATION_DETAILS_SETTINGS,
+            Uri.parse("package:$packageName"),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        startActivity(intent)
     }
 
     private fun launchPickFolder() {
@@ -580,19 +598,19 @@ fun PermissionsTab(
         PermissionRow(
             label = "Спецвозможности (управление экраном)",
             granted = state.serviceEnabled,
-            actionLabel = if (state.serviceEnabled) "Открыть настройки" else "Включить",
+            actionLabel = if (state.serviceEnabled) "Отключить" else "Включить",
             onClick = onOpenAccessibility,
         )
         PermissionRow(
             label = "Overlay поверх других приложений (50%)",
             granted = state.overlayGranted,
-            actionLabel = if (state.overlayGranted) "Открыть настройки" else "Разрешить",
+            actionLabel = if (state.overlayGranted) "Отключить" else "Разрешить",
             onClick = onRequestOverlay,
         )
         PermissionRow(
             label = "Микрофон (для listen / record_audio)",
             granted = state.micGranted,
-            actionLabel = if (state.micGranted) "Уже выдано" else "Запросить",
+            actionLabel = if (state.micGranted) "Отозвать" else "Разрешить",
             onClick = onRequestMic,
         )
 
@@ -613,7 +631,7 @@ fun PermissionsTab(
             PermissionRow(
                 label = "MANAGE_EXTERNAL_STORAGE (полный доступ)",
                 granted = state.manageStorageGranted,
-                actionLabel = if (state.manageStorageGranted) "Открыть настройки" else "Разрешить",
+                actionLabel = if (state.manageStorageGranted) "Отключить" else "Разрешить",
                 onClick = onRequestManageStorage,
             )
         }

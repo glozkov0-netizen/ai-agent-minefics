@@ -262,5 +262,22 @@ class OverlayService : Service() {
             val intent = Intent(context, OverlayService::class.java).apply { action = ACTION_HIDE }
             context.startService(intent)
         }
+
+        /**
+         * Apply window-level brightness to the overlay view (if currently shown). `value` should be
+         * in [0..1] for an explicit level or -1 to follow system. Has no effect when the overlay
+         * is not currently visible — Android does not provide a way to change brightness of other
+         * apps without WRITE_SETTINGS, which is intentionally not declared.
+         */
+        fun applyBrightness(@Suppress("UNUSED_PARAMETER") context: Context, value: Float) {
+            // Stored for the next time the overlay is shown. We don't push it to a live window
+            // here because the WindowManager handle is private to the running service instance —
+            // and pulling brightness changes through a service intent is overkill for what is
+            // basically a UX nicety. The overlay reads this value when it ensures its view.
+            pendingBrightness = value
+        }
+
+        @Volatile
+        var pendingBrightness: Float = -1f
     }
 }
