@@ -125,7 +125,9 @@ class Settings(context: Context) {
         const val DEFAULT_MAX_STEPS = 10_000
         const val DEFAULT_TEMPERATURE = 0.2f
         const val DEFAULT_MAX_TOKENS = 2048
-        const val DEFAULT_REASONING_EFFORT = "low"
+        // Empty by default: most providers/models do NOT accept this parameter and will
+        // return HTTP 400 if it is sent. The Settings UI lets the user opt in.
+        const val DEFAULT_REASONING_EFFORT = ""
 
         /** 0.0 = auto (capture-on-demand). Otherwise frames per second. */
         const val DEFAULT_SCREEN_FPS = 0.0f

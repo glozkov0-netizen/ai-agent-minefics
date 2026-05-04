@@ -123,20 +123,35 @@ class Agent(
                     client.chat(baseRequest)
                 } catch (e: LlmException) {
                     val msg = e.message.orEmpty()
-                    if (msg.startsWith("HTTP 400") && msg.contains("Parsing", ignoreCase = true)) {
-                        onLog(AgentLog.Error("Модель сгенерировала некорректный tool-call. Пробую ещё раз с подсказкой быть короче."))
-                        messages.add(
-                            textMessage(
-                                role = "system",
-                                text = "Your previous response was rejected by the API as malformed. " +
-                                    "Reply with a SINGLE short tool call. Do not embed long text or newlines " +
-                                    "in tool arguments. Keep `text` arguments under 500 characters and " +
-                                    "without literal newline characters.",
-                            ),
-                        )
-                        client.chat(baseRequest.copy(temperature = 0.0))
-                    } else {
-                        throw e
+                    when {
+                        // Some Groq models (and most non-OpenAI providers) reject
+                        // `reasoning_effort`. Disable it for this run AND persist the change so the
+                        // next runs don't fail the same way, then retry the same step.
+                        msg.startsWith("HTTP 400") &&
+                            msg.contains("reasoning_effort", ignoreCase = true) -> {
+                            onLog(
+                                AgentLog.Error(
+                                    "Модель не поддерживает reasoning_effort — отключаю и пробую снова. " +
+                                        "Параметр выключен в Настройках, чтобы это не повторялось.",
+                                ),
+                            )
+                            settings.reasoningEffort = ""
+                            client.chat(baseRequest.copy(reasoningEffort = null))
+                        }
+                        msg.startsWith("HTTP 400") && msg.contains("Parsing", ignoreCase = true) -> {
+                            onLog(AgentLog.Error("Модель сгенерировала некорректный tool-call. Пробую ещё раз с подсказкой быть короче."))
+                            messages.add(
+                                textMessage(
+                                    role = "system",
+                                    text = "Your previous response was rejected by the API as malformed. " +
+                                        "Reply with a SINGLE short tool call. Do not embed long text or newlines " +
+                                        "in tool arguments. Keep `text` arguments under 500 characters and " +
+                                        "without literal newline characters.",
+                                ),
+                            )
+                            client.chat(baseRequest.copy(temperature = 0.0))
+                        }
+                        else -> throw e
                     }
                 }
                 val choice = response.choices.firstOrNull()

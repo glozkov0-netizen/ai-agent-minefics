@@ -454,7 +454,7 @@ data class UiState(
     val maxSteps: Int = 10_000,
     val temperature: Float = 0.2f,
     val maxTokens: Int = 2048,
-    val reasoningEffort: String = "low",
+    val reasoningEffort: String = "",
     val systemPrompt: String = "",
     val log: List<LogEntry> = emptyList(),
     /** When non-null, the agent is waiting for the user to answer this question. */
