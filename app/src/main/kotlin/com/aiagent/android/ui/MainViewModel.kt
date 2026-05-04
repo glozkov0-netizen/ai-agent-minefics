@@ -1,7 +1,14 @@
 package com.aiagent.android.ui
 
+import android.Manifest
 import android.app.Application
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.Settings as AndroidSettings
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aiagent.android.agent.Agent
@@ -34,6 +41,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             maxTokens = settings.maxTokens,
             reasoningEffort = settings.reasoningEffort,
             systemPrompt = settings.systemPrompt,
+            screenFps = settings.screenFps,
+            audioSource = settings.audioSource,
+            sttProvider = settings.sttProvider,
+            ttsRate = settings.ttsRate,
+            fileAccessMode = settings.fileAccessMode,
+            allowedFolders = settings.allowedFolders.toList(),
+            overlayAlpha = settings.overlayAlpha,
         ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -42,8 +56,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var pendingAnswerChannel: Channel<String>? = null
     private var pendingProjectionChannel: Channel<ProjectionGrant>? = null
 
+    init {
+        refreshPermissionStatus()
+    }
+
     fun refreshServiceStatus() {
         _state.update { it.copy(serviceEnabled = AgentAccessibilityService.isRunning()) }
+        refreshPermissionStatus()
+    }
+
+    fun refreshPermissionStatus() {
+        val app = getApplication<Application>()
+        val overlay = AndroidSettings.canDrawOverlays(app)
+        val manageStorage = if (Build.VERSION.SDK_INT >= 30) Environment.isExternalStorageManager() else true
+        val mic = ContextCompat.checkSelfPermission(app, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
+        _state.update {
+            it.copy(
+                overlayGranted = overlay,
+                manageStorageGranted = manageStorage,
+                micGranted = mic,
+                allowedFolders = settings.allowedFolders.toList(),
+            )
+        }
     }
 
     fun updateApiKey(value: String) {
@@ -84,6 +119,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun updateSystemPrompt(value: String) {
         settings.systemPrompt = value
         _state.update { it.copy(systemPrompt = value) }
+    }
+
+    fun updateScreenFps(value: Float) {
+        settings.screenFps = value
+        _state.update { it.copy(screenFps = value) }
+    }
+
+    fun updateAudioSource(value: String) {
+        settings.audioSource = value
+        _state.update { it.copy(audioSource = value) }
+    }
+
+    fun updateSttProvider(value: String) {
+        settings.sttProvider = value
+        _state.update { it.copy(sttProvider = value) }
+    }
+
+    fun updateTtsRate(value: Float) {
+        settings.ttsRate = value
+        _state.update { it.copy(ttsRate = value) }
+    }
+
+    fun updateFileAccessMode(value: String) {
+        settings.fileAccessMode = value
+        _state.update { it.copy(fileAccessMode = value) }
+    }
+
+    fun updateOverlayAlpha(value: Float) {
+        settings.overlayAlpha = value
+        _state.update { it.copy(overlayAlpha = value) }
+    }
+
+    fun addAllowedFolder(uri: String) {
+        val newSet = settings.allowedFolders + uri
+        settings.allowedFolders = newSet
+        _state.update { it.copy(allowedFolders = newSet.toList()) }
+    }
+
+    fun removeAllowedFolder(uri: String) {
+        val newSet = settings.allowedFolders - uri
+        settings.allowedFolders = newSet
+        _state.update { it.copy(allowedFolders = newSet.toList()) }
     }
 
     fun updateInstruction(value: String) {
@@ -182,7 +259,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             putExtra(ScreenRecorderService.EXTRA_RESULT_CODE, grant.resultCode)
             putExtra(ScreenRecorderService.EXTRA_DATA, grant.data)
         }
-        if (android.os.Build.VERSION.SDK_INT >= 26) {
+        if (Build.VERSION.SDK_INT >= 26) {
             app.startForegroundService(intent)
         } else {
             app.startService(intent)
@@ -216,6 +293,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun isProjectionPending(): Boolean = pendingProjectionChannel != null
+
+    /** Persist a SAF tree URI grant so the agent can reach the picked folder later. */
+    fun onFolderPicked(uri: Uri) {
+        val app = getApplication<Application>()
+        runCatching {
+            app.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }
+        addAllowedFolder(uri.toString())
+    }
 
     private suspend fun appendAgentLog(entry: AgentLog) {
         val log = when (entry) {
@@ -254,6 +343,20 @@ data class UiState(
     val pendingAnswer: String = "",
     /** When true, the agent has requested screen recording and the UI must show the consent button. */
     val pendingProjection: Boolean = false,
+
+    // Game-assistant settings.
+    val screenFps: Float = 0f,
+    val audioSource: String = "mic",
+    val sttProvider: String = "groq",
+    val ttsRate: Float = 1.0f,
+    val fileAccessMode: String = "saf",
+    val allowedFolders: List<String> = emptyList(),
+    val overlayAlpha: Float = 0.5f,
+
+    // Runtime permission status.
+    val overlayGranted: Boolean = false,
+    val manageStorageGranted: Boolean = false,
+    val micGranted: Boolean = false,
 )
 
 data class ProjectionGrant(val resultCode: Int, val data: Intent?)

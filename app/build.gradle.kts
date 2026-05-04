@@ -79,4 +79,10 @@ dependencies {
     implementation("io.ktor:ktor-client-logging:2.3.7")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+
+    // On-device OCR for screen text recognition (no LLM vision required).
+    implementation("com.google.mlkit:text-recognition:16.0.0")
+
+    // Storage Access Framework helpers for user-granted folder access.
+    implementation("androidx.documentfile:documentfile:1.0.1")
 }

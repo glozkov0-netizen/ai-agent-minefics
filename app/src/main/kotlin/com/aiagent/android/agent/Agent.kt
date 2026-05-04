@@ -2,15 +2,24 @@ package com.aiagent.android.agent
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.util.Log
+import com.aiagent.android.audio.MicRecorder
 import com.aiagent.android.data.Settings
+import com.aiagent.android.device.DeviceInfo
+import com.aiagent.android.files.FileTools
 import com.aiagent.android.llm.ChatMessage
 import com.aiagent.android.llm.ChatRequest
 import com.aiagent.android.llm.LlmClient
 import com.aiagent.android.llm.LlmException
 import com.aiagent.android.llm.ToolCall
+import com.aiagent.android.ocr.OcrEngine
+import com.aiagent.android.overlay.OverlayService
 import com.aiagent.android.service.AgentAccessibilityService
 import com.aiagent.android.service.ScreenState
+import com.aiagent.android.stt.SpeechToText
+import com.aiagent.android.tts.TtsManager
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -20,13 +29,18 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.io.File
+import java.io.FileOutputStream
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Drives the LLM <-> device interaction loop.
  *
  *  1. Send the user's instruction + system prompt to the LLM with the available tool schemas.
  *  2. The LLM returns one or more tool calls.
- *  3. Each tool call is executed against the AccessibilityService.
+ *  3. Each tool call is executed against the AccessibilityService / OS APIs.
  *  4. The tool results are appended to the conversation and we loop until the LLM calls `done`
  *     (or we exceed [Settings.maxSteps]).
  */
@@ -39,6 +53,14 @@ class Agent(
     private val onLog: suspend (AgentLog) -> Unit,
 ) {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    // Lazy-initialised heavy components.
+    private val tts: TtsManager by lazy { TtsManager(context) }
+    private val stt: SpeechToText by lazy { SpeechToText(context, settings) }
+    private val fileTools: FileTools by lazy { FileTools(context, settings) }
+    private val micRecorder = MicRecorder()
+
+    @Volatile private var lastScreenshotMs: Long = 0L
 
     suspend fun run(userInstruction: String) {
         val service = AgentAccessibilityService.instance
@@ -75,9 +97,6 @@ class Agent(
                     client.chat(baseRequest)
                 } catch (e: LlmException) {
                     val msg = e.message.orEmpty()
-                    // Some models (notably Groq's gpt-oss-*) occasionally emit a malformed tool
-                    // payload that the provider rejects with HTTP 400. Recover by injecting a
-                    // hint nudging the model to be terser, and retry once with the same history.
                     if (msg.startsWith("HTTP 400") && msg.contains("Parsing", ignoreCase = true)) {
                         onLog(AgentLog.Error("Модель сгенерировала некорректный tool-call. Пробую ещё раз с подсказкой быть короче."))
                         messages.add(
@@ -106,7 +125,6 @@ class Agent(
                 messages.add(msg)
                 val toolCalls = msg.toolCalls.orEmpty()
                 if (toolCalls.isEmpty()) {
-                    // Model decided to stop without calling `done`. Treat as completion.
                     onLog(AgentLog.Done(msg.content ?: "(остановлено без вызова инструмента)", success = true))
                     return
                 }
@@ -136,6 +154,7 @@ class Agent(
             onLog(AgentLog.Error(e.message ?: e.toString()))
         } finally {
             client.close()
+            runCatching { tts.shutdown() }
             returnToApp()
         }
     }
@@ -167,6 +186,34 @@ class Agent(
                     summary = "экран считан → ${state.nodes.size} элементов",
                     newScreenState = state,
                 )
+            }
+            "read_screen_text" -> {
+                val bitmap = throttleAndCapture(service)
+                if (bitmap == null) {
+                    ToolResult.error("Не удалось получить изображение экрана. На Android < 11 OCR не поддерживается без MediaProjection.")
+                } else {
+                    val text = try {
+                        OcrEngine.extractText(bitmap)
+                    } catch (e: Exception) {
+                        "[ошибка OCR: ${e.message}]"
+                    }
+                    ToolResult(
+                        toolContent = "Foreground app: ${service.captureScreenState().packageName}\n--- OCR ---\n$text",
+                        summary = "OCR: ${text.length} символов",
+                    )
+                }
+            }
+            "take_screenshot" -> {
+                val bitmap = throttleAndCapture(service)
+                if (bitmap == null) {
+                    ToolResult.error("Не удалось получить скриншот.")
+                } else {
+                    val path = saveBitmapToPng(bitmap)
+                    ToolResult(
+                        toolContent = "Saved screenshot to $path",
+                        summary = "сохранён скриншот: $path",
+                    )
+                }
             }
             "tap" -> {
                 val nodeId = args.intOf("node_id") ?: return ToolResult.error("Missing node_id")
@@ -283,6 +330,114 @@ class Agent(
                     summary = "вопрос «$question» → «$answer»",
                 )
             }
+            "ask_user_overlay" -> {
+                val question = args.stringOf("question") ?: return ToolResult.error("Missing question")
+                onLog(AgentLog.AskUser("[overlay] $question"))
+                val deferred = CompletableDeferred<String>()
+                OverlayService.Pending.deferred = deferred
+                OverlayService.showQuestion(context, question)
+                val choice = try {
+                    deferred.await()
+                } finally {
+                    OverlayService.Pending.deferred = null
+                    OverlayService.hide(context)
+                }
+                val answer = if (choice == "open") askUser(question) else choice
+                ToolResult(
+                    toolContent = answer,
+                    summary = "overlay «$question» → «$answer»",
+                )
+            }
+            "speak" -> {
+                val text = args.stringOf("text") ?: return ToolResult.error("Missing text")
+                val rate = args.floatOf("rate") ?: settings.ttsRate
+                val ok = tts.speak(text, rate)
+                ToolResult(
+                    toolContent = if (ok) "Spoke ${text.length} chars" else "TTS failed",
+                    summary = if (ok) "озвучено: «${text.take(40)}»" else "не удалось озвучить",
+                )
+            }
+            "listen" -> {
+                val lang = args.stringOf("language")
+                val transcript = stt.listenLive(language = lang)
+                ToolResult(
+                    toolContent = transcript,
+                    summary = "услышано: «${transcript.take(80)}»",
+                )
+            }
+            "record_audio" -> {
+                val seconds = (args.intOf("seconds") ?: 6).coerceIn(1, 60)
+                val lang = args.stringOf("language")
+                val outDir = File(context.getExternalFilesDir(null) ?: context.filesDir, "audio").apply { mkdirs() }
+                val outFile = File(outDir, "rec-${System.currentTimeMillis()}.wav")
+                val started = micRecorder.start(outFile, maxMs = seconds * 1000L)
+                if (!started) return ToolResult.error("Не удалось начать запись (нет разрешения RECORD_AUDIO?).")
+                delay(seconds * 1000L)
+                val finalFile = micRecorder.stop()
+                if (finalFile == null || !finalFile.exists()) {
+                    return ToolResult.error("Запись не удалась.")
+                }
+                val text = stt.transcribeFile(finalFile, language = lang)
+                ToolResult(
+                    toolContent = text,
+                    summary = "${seconds}с → «${text.take(80)}»",
+                )
+            }
+            "device_info" -> {
+                val info = DeviceInfo.gather(context)
+                ToolResult(
+                    toolContent = info,
+                    summary = "device_info (${info.length} симв.)",
+                )
+            }
+            "list_files" -> {
+                val path = args.stringOf("path") ?: return ToolResult.error("Missing path")
+                val out = try {
+                    fileTools.listEntries(path)
+                } catch (e: SecurityException) {
+                    "[доступ запрещён: ${e.message}]"
+                }
+                ToolResult(toolContent = out, summary = "list $path")
+            }
+            "read_file" -> {
+                val path = args.stringOf("path") ?: return ToolResult.error("Missing path")
+                val maxBytes = args.intOf("max_bytes") ?: 65536
+                val out = try {
+                    fileTools.readText(path, maxBytes)
+                } catch (e: SecurityException) {
+                    "[доступ запрещён: ${e.message}]"
+                }
+                ToolResult(toolContent = out, summary = "read $path (${out.length} симв.)")
+            }
+            "write_file" -> {
+                val path = args.stringOf("path") ?: return ToolResult.error("Missing path")
+                val content = args.stringOf("content") ?: return ToolResult.error("Missing content")
+                val mime = args.stringOf("mime_type") ?: "text/plain"
+                val out = try {
+                    fileTools.writeText(path, content, mime)
+                } catch (e: SecurityException) {
+                    "[доступ запрещён: ${e.message}]"
+                }
+                ToolResult(toolContent = out, summary = "write $path")
+            }
+            "make_dir" -> {
+                val path = args.stringOf("path") ?: return ToolResult.error("Missing path")
+                val out = try {
+                    fileTools.makeDir(path)
+                } catch (e: SecurityException) {
+                    "[доступ запрещён: ${e.message}]"
+                }
+                ToolResult(toolContent = out, summary = "mkdir $path")
+            }
+            "delete_file" -> {
+                val path = args.stringOf("path") ?: return ToolResult.error("Missing path")
+                val out = try {
+                    fileTools.deletePath(path)
+                } catch (e: SecurityException) {
+                    "[доступ запрещён: ${e.message}]"
+                }
+                ToolResult(toolContent = out, summary = "rm $path")
+            }
             "start_screen_recording" -> {
                 val res = startScreenRecording()
                 ToolResult(
@@ -310,8 +465,29 @@ class Agent(
         }
     }
 
+    /** Capture a screen bitmap, throttled by `Settings.screenFps`. */
+    private suspend fun throttleAndCapture(service: AgentAccessibilityService): Bitmap? {
+        val fps = settings.screenFps
+        if (fps > 0f) {
+            val minIntervalMs = (1000f / fps).toLong()
+            val sinceLast = System.currentTimeMillis() - lastScreenshotMs
+            if (sinceLast < minIntervalMs) {
+                delay(minIntervalMs - sinceLast)
+            }
+        }
+        lastScreenshotMs = System.currentTimeMillis()
+        return service.captureBitmap()
+    }
+
+    private fun saveBitmapToPng(bitmap: Bitmap): String {
+        val dir = File(context.getExternalFilesDir(null) ?: context.filesDir, "screenshots").apply { mkdirs() }
+        val name = "shot-" + SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(Date()) + ".png"
+        val file = File(dir, name)
+        FileOutputStream(file).use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
+        return file.absolutePath
+    }
+
     private fun computeSwipe(direction: String, distance: String): IntArray {
-        // Use display metrics from the running service window when available.
         val service = AgentAccessibilityService.instance
         val metrics = service?.resources?.displayMetrics
         val w = metrics?.widthPixels ?: 1080
@@ -347,34 +523,56 @@ class Agent(
     private fun JsonObject.boolOf(key: String): Boolean? =
         runCatching { (get(key) as? JsonPrimitive)?.boolean }.getOrNull()
 
+    private fun JsonObject.floatOf(key: String): Float? =
+        (get(key) as? JsonPrimitive)?.contentOrNull?.toFloatOrNull()
+
     companion object {
         private const val TAG = "Agent"
-        private const val SYSTEM_PROMPT = """You are an AI agent that controls an Android phone via the system Accessibility API on behalf of the user.
+        private const val SYSTEM_PROMPT = """You are an AI agent that lives on the user's Android phone and helps them — especially during gameplay. You can observe the screen, listen to audio, speak, write files, and control the UI through Accessibility.
 
-You can call tools to inspect the screen and perform UI actions. Always:
-1. Start by calling `read_screen` to understand the current state.
-2. Decide the next single concrete action and call exactly one tool.
-3. After actions that change the UI (tap, type, swipe, open_app, press_back, press_home, press_recents), call `read_screen` again before deciding the next action.
-4. When the task is complete (or impossible), call `done` with a concise summary.
+You have these tools:
 
-Do NOT call `done` prematurely. Specifically:
-- If the user asked you to write/type text, you must have successfully called `type_text` AND the next `read_screen` must show that text in the field. Only THEN call `done(success=true)`.
-- If the user asked you to find or open something, you must have actually navigated there and `read_screen` must confirm it before calling `done`.
-- After what you believe is the final action, ALWAYS run one more `read_screen` to verify the desired state, and only then call `done`.
-- If a tool result indicates failure (e.g. "нет активного поля ввода", "не удалось нажать"), recover by tapping the right node first or trying another approach — do NOT just call `done(success=false)` immediately. Try at least 2-3 alternative approaches first.
+VISION
+- read_screen        → list the active app and its interactive UI nodes (use first; fast).
+- read_screen_text   → on-device OCR of the current screen pixels (slower; use when read_screen returns nothing useful, e.g. inside games / video players that draw to a SurfaceView).
+- take_screenshot    → save a PNG of the current screen to disk and return its path.
 
-Rules:
-- Prefer `tap` with a node_id from the most recent `read_screen` over `tap_at` coordinates.
-- If a field is editable but not yet focused, tap it first, then call `type_text` on the next turn.
-- Before calling `type_text(node_id=N)`, verify in `read_screen` that node N has class containing 'Edit' / 'EditText' / 'TextField' or attribute editable=true. If unsure, tap it first and re-read the screen.
-- After every `type_text` call, immediately call `read_screen` and confirm the new text is present in the editable field. If it is not, do NOT give up: tap the field first, then retry `type_text`. If still empty after 2 attempts, call `ask_user` to confirm the field selection rather than giving up silently.
-- The screen recording tools (`start_screen_recording` / `stop_screen_recording`) record the device screen as an MP4 video. Use them only when the user explicitly asked to "record a guide / video / how-to". The first call pauses for the user to grant Android's MediaProjection consent — that is normal, just wait. Always call `stop_screen_recording` once the demonstration is finished.
-- If you need to scroll to find content, use `swipe up` to scroll content downward.
-- Be cautious: do not perform destructive actions (deleting data, sending money, mass-messaging) unless the user explicitly asked for them. When in doubt, call `ask_user` with a yes/no question.
-- When the user's instruction is ambiguous (which app, which item, which value), call `ask_user` with a short question in the user's language and use their answer; do NOT guess silently.
-- Keep textual replies short. Most of your output should be tool calls. When using `type_text`, keep the text reasonable in length (under 1000 characters) and avoid embedded newlines unless absolutely required.
-- If you see a permission dialog blocking the task, tap the appropriate button (Allow/While using the app) yourself.
-- Reply in the same language the user used in their instruction (so Russian instructions get Russian `done` summaries and Russian `ask_user` questions).
+ACTUATION
+- tap / tap_at / swipe / swipe_at / type_text → interact with the UI.
+- press_back / press_home / press_recents     → system navigation.
+- open_app(package_name)                      → launch an app by package.
+- wait(ms)                                    → pause for animations.
+
+VOICE / AUDIO
+- speak(text, rate?)              → say something out loud through the device speaker.
+- listen(language?)               → one-shot live mic listen via the platform recogniser.
+- record_audio(seconds, language?) → record N seconds of mic audio and transcribe via Whisper.
+
+USER INTERACTION
+- ask_user(question)         → ask a free-form question; the answer comes back as text.
+- ask_user_overlay(question) → display a 50%-transparent overlay on top of the current app (works during gameplay) with Yes/No/Open/Dismiss buttons. Result: 'yes' / 'no' / 'dismiss' / the user's typed answer.
+
+DEVICE / FILES
+- device_info  → model, OS, screen, RAM, battery, network, hardware features.
+- list_files(path), read_file(path), write_file(path, content), make_dir(path), delete_file(path)
+   Path rules: 'content://...' or 'name/sub/path' relative to one of the user's allowed folders, or — only when 'all-files' mode is enabled in Settings — an absolute path like '/storage/emulated/0/...'.
+
+VIDEO RECORDING
+- start_screen_recording / stop_screen_recording → MP4 of the screen via MediaProjection. The first call pauses for the system consent dialog.
+
+DONE
+- done(summary, success) → end the loop with a final report.
+
+Workflow rules:
+1. For typical UI tasks, START with `read_screen`. If the foreground is a game / SurfaceView, also call `read_screen_text` for OCR.
+2. After every UI mutation (tap / type / swipe / open_app / press_*), re-call `read_screen` (and `read_screen_text` for games) BEFORE deciding the next action.
+3. Prefer `tap(node_id)` over `tap_at(x,y)` whenever a node id is available.
+4. If the user is in a game and asked you to comment / coach: prefer `speak` for short remarks (one sentence), and `ask_user_overlay` for yes/no questions so the game stays in focus.
+5. If the user asked you to read out chat or a system message that is rendered in a game / image, use `read_screen_text` to get the text first, then `speak` it.
+6. Keep `type_text` payloads under 1000 characters and avoid embedded newlines unless absolutely required.
+7. When file writes / deletions are destructive, confirm with `ask_user_overlay` first.
+8. When the task is finished, ALWAYS call `done(summary, success)`.
+9. Reply in the user's language (default Russian) for user-facing strings (`speak`, `ask_user`, `ask_user_overlay`, `done.summary`).
 """
     }
 }
@@ -388,15 +586,18 @@ sealed class AgentLog {
     data class Error(val message: String) : AgentLog()
 }
 
-private data class ToolResult(
+internal data class ToolResult(
     val toolContent: String,
     val summary: String,
     val newScreenState: ScreenState? = null,
     val done: DoneSignal? = null,
 ) {
     companion object {
-        fun error(message: String) = ToolResult(toolContent = "ERROR: $message", summary = "error: $message")
+        fun error(message: String): ToolResult = ToolResult(
+            toolContent = "Error: $message",
+            summary = "ошибка: $message",
+        )
     }
 }
 
-private data class DoneSignal(val summary: String, val success: Boolean)
+internal data class DoneSignal(val summary: String, val success: Boolean)

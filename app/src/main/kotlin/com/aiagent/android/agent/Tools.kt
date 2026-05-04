@@ -15,6 +15,8 @@ object Tools {
 
     fun toolList(): List<Tool> = listOf(
         Tool(function = readScreen),
+        Tool(function = readScreenText),
+        Tool(function = takeScreenshot),
         Tool(function = tap),
         Tool(function = tapAt),
         Tool(function = swipe),
@@ -26,6 +28,16 @@ object Tools {
         Tool(function = openApp),
         Tool(function = waitMs),
         Tool(function = askUser),
+        Tool(function = askUserOverlay),
+        Tool(function = speak),
+        Tool(function = listenMic),
+        Tool(function = recordAudioAndTranscribe),
+        Tool(function = deviceInfo),
+        Tool(function = listFiles),
+        Tool(function = readFile),
+        Tool(function = writeFile),
+        Tool(function = makeDir),
+        Tool(function = deleteFile),
         Tool(function = startScreenRecording),
         Tool(function = stopScreenRecording),
         Tool(function = done),
@@ -36,6 +48,24 @@ object Tools {
         description = "Capture a textual snapshot of the currently visible UI. " +
             "Returns the foreground app package and a numbered list of interactive nodes. " +
             "Always call this once at the start of a task and again after navigation actions.",
+        parameters = obj { put("type", "object"); putJsonObject("properties") {} },
+    )
+
+    private val readScreenText = FunctionDef(
+        name = "read_screen_text",
+        description = "Recognise on-screen text via on-device OCR (ML Kit). Useful for games or " +
+            "video players where the Accessibility tree exposes nothing — labels rendered into a " +
+            "SurfaceView are still picked up. Returns blocks of recognised text with their pixel " +
+            "bounding boxes. Slower than read_screen — prefer read_screen first when an a11y " +
+            "tree is available.",
+        parameters = obj { put("type", "object"); putJsonObject("properties") {} },
+    )
+
+    private val takeScreenshot = FunctionDef(
+        name = "take_screenshot",
+        description = "Capture the screen as an in-memory image and save it to the app's " +
+            "private folder. Returns the absolute path of the saved PNG. Throttled by the FPS " +
+            "setting (default = on demand).",
         parameters = obj { put("type", "object"); putJsonObject("properties") {} },
     )
 
@@ -179,6 +209,161 @@ object Tools {
                 }
             }
             put("required", arr("question"))
+        },
+    )
+
+    private val askUserOverlay = FunctionDef(
+        name = "ask_user_overlay",
+        description = "Ask the user a quick yes/no question via a 50%-transparent floating overlay " +
+            "that stays on top of the current app (so it works during gameplay). The user can " +
+            "answer 'yes' / 'no' / 'open' (open the app for a free-form text reply) / 'dismiss'. " +
+            "The result is one of those keywords or the user's typed answer if they tapped 'open'.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("question") {
+                    put("type", "string")
+                    put("description", "Short yes/no question, one or two sentences max.")
+                }
+            }
+            put("required", arr("question"))
+        },
+    )
+
+    private val speak = FunctionDef(
+        name = "speak",
+        description = "Say the given text out loud via the device's TTS engine. Use this when the user " +
+            "asked the agent to speak / give voice feedback during gameplay so they can keep their " +
+            "eyes on the game.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("text") {
+                    put("type", "string")
+                    put("description", "What to say. Keep it short (one sentence is best).")
+                }
+                putJsonObject("rate") {
+                    put("type", "number")
+                    put("description", "Speech rate; 1.0 is normal, 0.5 slow, 2.0 very fast. Optional.")
+                }
+            }
+            put("required", arr("text"))
+        },
+    )
+
+    private val listenMic = FunctionDef(
+        name = "listen",
+        description = "Listen to the microphone for one short utterance and return the transcribed " +
+            "text. Uses the on-device SpeechRecognizer. Returns immediately when the user stops " +
+            "speaking or after a short timeout.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("language") {
+                    put("type", "string")
+                    put("description", "BCP-47 tag like 'ru-RU' or 'en-US'. Optional.")
+                }
+            }
+        },
+    )
+
+    private val recordAudioAndTranscribe = FunctionDef(
+        name = "record_audio",
+        description = "Record N seconds of microphone audio and transcribe via Whisper (Groq). " +
+            "Use this when 'listen' is too short — for example to capture a longer voice chat " +
+            "from a game speaker held next to the phone, or to get a higher-accuracy transcript.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("seconds") {
+                    put("type", "integer")
+                    put("description", "Recording duration. Default 6, max 60.")
+                }
+                putJsonObject("language") {
+                    put("type", "string")
+                    put("description", "BCP-47 / ISO-639-1 tag. Optional.")
+                }
+            }
+        },
+    )
+
+    private val deviceInfo = FunctionDef(
+        name = "device_info",
+        description = "Return a multi-section text dump of device information: model / OS / screen / " +
+            "RAM / storage / battery / network / hardware features. Useful when the user asks " +
+            "'what phone am I on' or 'how much battery is left'.",
+        parameters = obj { put("type", "object"); putJsonObject("properties") {} },
+    )
+
+    private val listFiles = FunctionDef(
+        name = "list_files",
+        description = "List the contents of a folder. The path can be either a SAF tree URI " +
+            "(content://...), a path relative to one of the allowed folders the user picked in " +
+            "settings, or — when 'all-files-access' is enabled — an absolute path " +
+            "(/storage/emulated/0/Download).",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("path") { put("type", "string") }
+            }
+            put("required", arr("path"))
+        },
+    )
+
+    private val readFile = FunctionDef(
+        name = "read_file",
+        description = "Read up to 64 KiB from a text file. The path follows the same rules as list_files.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("path") { put("type", "string") }
+                putJsonObject("max_bytes") {
+                    put("type", "integer")
+                    put("description", "Optional limit, default 65536")
+                }
+            }
+            put("required", arr("path"))
+        },
+    )
+
+    private val writeFile = FunctionDef(
+        name = "write_file",
+        description = "Write text to a file (creating it if needed). Same path rules as list_files.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("path") { put("type", "string") }
+                putJsonObject("content") { put("type", "string") }
+                putJsonObject("mime_type") {
+                    put("type", "string")
+                    put("description", "Optional MIME type for new files (default text/plain)")
+                }
+            }
+            put("required", arr("path", "content"))
+        },
+    )
+
+    private val makeDir = FunctionDef(
+        name = "make_dir",
+        description = "Create a folder (and any parent folders) at the given path.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("path") { put("type", "string") }
+            }
+            put("required", arr("path"))
+        },
+    )
+
+    private val deleteFile = FunctionDef(
+        name = "delete_file",
+        description = "Delete a file or folder (recursively). Use with caution.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("path") { put("type", "string") }
+            }
+            put("required", arr("path"))
         },
     )
 

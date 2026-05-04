@@ -1,8 +1,11 @@
 package com.aiagent.android.ui
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings as AndroidSettings
 import androidx.activity.ComponentActivity
@@ -15,7 +18,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -36,6 +38,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
@@ -66,12 +69,41 @@ class MainActivity : ComponentActivity() {
             viewModel.onProjectionResult(result.resultCode, result.data)
         }
 
+    private val overlayLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            viewModel.refreshPermissionStatus()
+        }
+
+    private val manageStorageLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            viewModel.refreshPermissionStatus()
+        }
+
+    private val micPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+            viewModel.refreshPermissionStatus()
+        }
+
+    private val openTreeLauncher =
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
+            if (uri != null) {
+                viewModel.onFolderPicked(uri)
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    AppRoot(viewModel, ::launchProjectionConsent)
+                    AppRoot(
+                        viewModel = viewModel,
+                        onRequestProjection = ::launchProjectionConsent,
+                        onRequestOverlay = ::launchOverlayPermission,
+                        onRequestManageStorage = ::launchManageStoragePermission,
+                        onRequestMic = ::requestMicPermission,
+                        onPickFolder = ::launchPickFolder,
+                    )
                 }
             }
         }
@@ -82,6 +114,31 @@ class MainActivity : ComponentActivity() {
         projectionLauncher.launch(mpm.createScreenCaptureIntent())
     }
 
+    private fun launchOverlayPermission() {
+        val intent = Intent(
+            AndroidSettings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:$packageName"),
+        )
+        overlayLauncher.launch(intent)
+    }
+
+    private fun launchManageStoragePermission() {
+        if (Build.VERSION.SDK_INT < 30) return
+        val intent = Intent(
+            AndroidSettings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+            Uri.parse("package:$packageName"),
+        )
+        manageStorageLauncher.launch(intent)
+    }
+
+    private fun requestMicPermission() {
+        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+    }
+
+    private fun launchPickFolder() {
+        openTreeLauncher.launch(null)
+    }
+
     override fun onResume() {
         super.onResume()
         viewModel.refreshServiceStatus()
@@ -90,7 +147,14 @@ class MainActivity : ComponentActivity() {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppRoot(viewModel: MainViewModel, onRequestProjection: () -> Unit) {
+fun AppRoot(
+    viewModel: MainViewModel,
+    onRequestProjection: () -> Unit,
+    onRequestOverlay: () -> Unit,
+    onRequestManageStorage: () -> Unit,
+    onRequestMic: () -> Unit,
+    onPickFolder: () -> Unit,
+) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var tab by remember { mutableIntStateOf(0) }
     val context = LocalContext.current
@@ -104,6 +168,7 @@ fun AppRoot(viewModel: MainViewModel, onRequestProjection: () -> Unit) {
             TabRow(selectedTabIndex = tab) {
                 Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Агент") })
                 Tab(selected = tab == 1, onClick = { tab = 1 }, text = { Text("Настройки") })
+                Tab(selected = tab == 2, onClick = { tab = 2 }, text = { Text("Доступы") })
             }
             when (tab) {
                 0 -> AgentTab(
@@ -131,6 +196,26 @@ fun AppRoot(viewModel: MainViewModel, onRequestProjection: () -> Unit) {
                     onMaxTokens = viewModel::updateMaxTokens,
                     onReasoningEffort = viewModel::updateReasoningEffort,
                     onSystemPrompt = viewModel::updateSystemPrompt,
+                    onScreenFps = viewModel::updateScreenFps,
+                    onSttProvider = viewModel::updateSttProvider,
+                    onTtsRate = viewModel::updateTtsRate,
+                    onAudioSource = viewModel::updateAudioSource,
+                    onOverlayAlpha = viewModel::updateOverlayAlpha,
+                )
+                2 -> PermissionsTab(
+                    state = state,
+                    onOpenAccessibility = {
+                        context.startActivity(
+                            Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        )
+                    },
+                    onRequestOverlay = onRequestOverlay,
+                    onRequestManageStorage = onRequestManageStorage,
+                    onRequestMic = onRequestMic,
+                    onPickFolder = onPickFolder,
+                    onRemoveFolder = viewModel::removeAllowedFolder,
+                    onSetFileMode = viewModel::updateFileAccessMode,
                 )
             }
         }
@@ -312,6 +397,11 @@ fun SettingsTab(
     onMaxTokens: (Int) -> Unit,
     onReasoningEffort: (String) -> Unit,
     onSystemPrompt: (String) -> Unit,
+    onScreenFps: (Float) -> Unit,
+    onSttProvider: (String) -> Unit,
+    onTtsRate: (Float) -> Unit,
+    onAudioSource: (String) -> Unit,
+    onOverlayAlpha: (Float) -> Unit,
 ) {
     val scrollState = rememberScrollState()
     Column(
@@ -390,6 +480,72 @@ fun SettingsTab(
             minLines = 3,
             maxLines = 8,
         )
+
+        Spacer(Modifier.height(4.dp))
+        Text("Захват экрана", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = if (state.screenFps <= 0f) "Режим: Авто (захват по требованию агента)"
+            else "Режим: ${"%.1f".format(state.screenFps)} fps",
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        Slider(
+            value = state.screenFps,
+            onValueChange = onScreenFps,
+            valueRange = 0f..10f,
+            steps = 19, // 0.5 step increments
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text(
+            "0 = авто (только когда агент явно просит). Иначе ограничение скорости — например, " +
+                "при 2 fps агент не сможет сделать больше двух скриншотов в секунду.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+
+        Spacer(Modifier.height(4.dp))
+        Text("Голос", style = MaterialTheme.typography.titleMedium)
+        OutlinedTextField(
+            value = state.ttsRate.toString(),
+            onValueChange = {
+                val v = it.toFloatOrNull()?.coerceIn(0.5f, 2.5f) ?: state.ttsRate
+                onTtsRate(v)
+            },
+            label = { Text("Скорость TTS (0.5 – 2.5; 1.0 = норма)") },
+            modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            singleLine = true,
+        )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ChoiceChip("groq Whisper", state.sttProvider == "groq") { onSttProvider("groq") }
+            ChoiceChip("Android STT", state.sttProvider == "android") { onSttProvider("android") }
+        }
+        Text(
+            "groq использует whisper-large-v3 поверх вашего API-ключа Groq (точность выше, требует интернет). " +
+                "Android — встроенный распознаватель Google (бесплатно, на устройстве, короче).",
+            style = MaterialTheme.typography.bodySmall,
+        )
+
+        Spacer(Modifier.height(4.dp))
+        Text("Источник аудио", style = MaterialTheme.typography.titleMedium)
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ChoiceChip("Микрофон", state.audioSource == "mic") { onAudioSource("mic") }
+            ChoiceChip("Системный звук", state.audioSource == "system") { onAudioSource("system") }
+        }
+        Text(
+            "Захват системного звука работает только на Android 10+ и только если приложение-источник " +
+                "не помечает свой звук как DO_NOT_CAPTURE (большинство игр и мессенджеров блокируют).",
+            style = MaterialTheme.typography.bodySmall,
+        )
+
+        Spacer(Modifier.height(4.dp))
+        Text("Прозрачность overlay", style = MaterialTheme.typography.titleMedium)
+        Text("${(state.overlayAlpha * 100).toInt()} %", style = MaterialTheme.typography.bodyMedium)
+        Slider(
+            value = state.overlayAlpha,
+            onValueChange = onOverlayAlpha,
+            valueRange = 0.1f..1.0f,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
         Text(
             "Поддерживается любой OpenAI-совместимый chat completions API с tool calling. Примеры: " +
                 "Groq — https://api.groq.com/openai/v1, модель openai/gpt-oss-120b. " +
@@ -399,4 +555,127 @@ fun SettingsTab(
             style = MaterialTheme.typography.bodySmall,
         )
     }
+}
+
+@Composable
+fun PermissionsTab(
+    state: UiState,
+    onOpenAccessibility: () -> Unit,
+    onRequestOverlay: () -> Unit,
+    onRequestManageStorage: () -> Unit,
+    onRequestMic: () -> Unit,
+    onPickFolder: () -> Unit,
+    onRemoveFolder: (String) -> Unit,
+    onSetFileMode: (String) -> Unit,
+) {
+    val scrollState = rememberScrollState()
+    Column(
+        modifier = Modifier.fillMaxSize()
+            .verticalScroll(scrollState)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Системные доступы", style = MaterialTheme.typography.titleMedium)
+
+        PermissionRow(
+            label = "Спецвозможности (управление экраном)",
+            granted = state.serviceEnabled,
+            actionLabel = if (state.serviceEnabled) "Открыть настройки" else "Включить",
+            onClick = onOpenAccessibility,
+        )
+        PermissionRow(
+            label = "Overlay поверх других приложений (50%)",
+            granted = state.overlayGranted,
+            actionLabel = if (state.overlayGranted) "Открыть настройки" else "Разрешить",
+            onClick = onRequestOverlay,
+        )
+        PermissionRow(
+            label = "Микрофон (для listen / record_audio)",
+            granted = state.micGranted,
+            actionLabel = if (state.micGranted) "Уже выдано" else "Запросить",
+            onClick = onRequestMic,
+        )
+
+        Spacer(Modifier.height(4.dp))
+        Text("Файлы и папки", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "По умолчанию агент видит только папки, которые вы выберете ниже (Storage Access Framework). " +
+                "Альтернативно можно выдать полный доступ ко всем файлам — Android запросит специальное " +
+                "разрешение в системных настройках.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            ChoiceChip("Только выбранные папки", state.fileAccessMode == "saf") { onSetFileMode("saf") }
+            ChoiceChip("Все файлы", state.fileAccessMode == "all") { onSetFileMode("all") }
+            ChoiceChip("Только приватная папка", state.fileAccessMode == "app") { onSetFileMode("app") }
+        }
+        if (state.fileAccessMode == "all") {
+            PermissionRow(
+                label = "MANAGE_EXTERNAL_STORAGE (полный доступ)",
+                granted = state.manageStorageGranted,
+                actionLabel = if (state.manageStorageGranted) "Открыть настройки" else "Разрешить",
+                onClick = onRequestManageStorage,
+            )
+        }
+        if (state.fileAccessMode == "saf") {
+            Button(onClick = onPickFolder, modifier = Modifier.fillMaxWidth()) {
+                Text("➕  Добавить папку, к которой агент получит доступ")
+            }
+            if (state.allowedFolders.isEmpty()) {
+                Text(
+                    "Нет добавленных папок. Пока что агент сможет работать только с приватной папкой " +
+                        "приложения (/Android/data/com.aiagent.android/files).",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            } else {
+                state.allowedFolders.forEach { uri ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Row(modifier = Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text(uri, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                            OutlinedButton(onClick = { onRemoveFolder(uri) }) { Text("✕") }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PermissionRow(
+    label: String,
+    granted: Boolean,
+    actionLabel: String,
+    onClick: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = if (granted) Color(0xFFDCEDC8) else Color(0xFFFFE0B2),
+        ),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(modifier = Modifier.weight(1f)) {
+                Column {
+                    Text(label, style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (granted) "Разрешено" else "Не разрешено",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (granted) Color(0xFF2E7D32) else Color(0xFFC62828),
+                    )
+                }
+            }
+            OutlinedButton(onClick = onClick) { Text(actionLabel) }
+        }
+    }
+}
+
+@Composable
+private fun ChoiceChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    val container = if (selected) Color(0xFF1976D2) else Color(0xFFE0E0E0)
+    val content = if (selected) Color.White else Color.Black
+    Button(
+        onClick = onClick,
+        colors = ButtonDefaults.buttonColors(containerColor = container, contentColor = content),
+    ) { Text(label) }
 }

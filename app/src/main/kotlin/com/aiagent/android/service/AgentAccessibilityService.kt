@@ -6,15 +6,20 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Path
 import android.graphics.Rect
+import android.hardware.HardwareBuffer
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.view.Display
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import kotlinx.coroutines.CompletableDeferred
+import java.util.concurrent.Executors
 
 /**
  * Accessibility service that exposes a high-level API for the agent to inspect the screen
@@ -262,6 +267,67 @@ class AgentAccessibilityService : AccessibilityService() {
     fun pressHome(): Boolean = performGlobalAction(GLOBAL_ACTION_HOME)
     fun pressRecents(): Boolean = performGlobalAction(GLOBAL_ACTION_RECENTS)
     fun pullNotifications(): Boolean = performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS)
+
+    /**
+     * Capture a still image of the current screen using the [AccessibilityService.takeScreenshot]
+     * API (Android 11+). Returns a software [Bitmap] suitable for ML Kit / display.
+     *
+     * On older platforms or on failure, this returns null and the caller should fall back to
+     * MediaProjection or the Accessibility tree.
+     */
+    suspend fun captureBitmap(): Bitmap? {
+        if (Build.VERSION.SDK_INT < 30) return null
+        val deferred = CompletableDeferred<Bitmap?>()
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                executor,
+                object : TakeScreenshotCallback {
+                    override fun onSuccess(screenshot: ScreenshotResult) {
+                        val hwBuffer: HardwareBuffer = screenshot.hardwareBuffer
+                        val bm = Bitmap.wrapHardwareBuffer(hwBuffer, screenshot.colorSpace)
+                        // Convert to software bitmap so callers can read pixels (ML Kit does not
+                        // accept HARDWARE-config bitmaps directly).
+                        val sw = bm?.copy(Bitmap.Config.ARGB_8888, false)
+                        runCatching { hwBuffer.close() }
+                        deferred.complete(sw)
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        Log.w(TAG, "takeScreenshot failed: $errorCode")
+                        deferred.complete(null)
+                    }
+                },
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "takeScreenshot threw", e)
+            deferred.complete(null)
+        }
+        val bm = deferred.await()
+        executor.shutdown()
+        return bm
+    }
+
+    /**
+     * Tap by coordinates that target a specific keyboard-key region. Used by the keyboard-fallback
+     * path when accessibility setText is rejected by the foreground IME (e.g. some Compose
+     * fields, WebView inputs in Chrome custom tabs).
+     */
+    suspend fun typeViaTaps(text: String, keyToBounds: Map<Char, Rect>): Boolean {
+        var allOk = true
+        for (ch in text) {
+            val bounds = keyToBounds[ch] ?: keyToBounds[ch.lowercaseChar()]
+            if (bounds == null) {
+                allOk = false
+            } else {
+                allOk = allOk and tap(bounds.centerX(), bounds.centerY())
+                // Small delay so the IME has time to register taps.
+                kotlinx.coroutines.delay(40)
+            }
+        }
+        return allOk
+    }
 
     private suspend fun dispatchAndWait(gesture: GestureDescription): Boolean {
         val deferred = CompletableDeferred<Boolean>()
