@@ -17,6 +17,8 @@ import com.aiagent.android.llm.ChatRequest
 import com.aiagent.android.llm.LlmClient
 import com.aiagent.android.llm.LlmException
 import com.aiagent.android.llm.ToolCall
+import com.aiagent.android.llm.textMessage
+import com.aiagent.android.llm.userImageMessage
 import com.aiagent.android.ocr.OcrEngine
 import com.aiagent.android.overlay.OverlayService
 import com.aiagent.android.service.AgentAccessibilityService
@@ -80,8 +82,8 @@ class Agent(
         val client = LlmClient(settings.baseUrl, settings.apiKey)
         val systemPrompt = settings.systemPrompt.takeIf { it.isNotBlank() } ?: SYSTEM_PROMPT
         val messages = mutableListOf<ChatMessage>(
-            ChatMessage(role = "system", content = systemPrompt),
-            ChatMessage(role = "user", content = userInstruction),
+            textMessage(role = "system", text = systemPrompt),
+            textMessage(role = "user", text = userInstruction),
         )
         var lastScreenState: ScreenState? = null
 
@@ -104,9 +106,9 @@ class Agent(
                     if (msg.startsWith("HTTP 400") && msg.contains("Parsing", ignoreCase = true)) {
                         onLog(AgentLog.Error("Модель сгенерировала некорректный tool-call. Пробую ещё раз с подсказкой быть короче."))
                         messages.add(
-                            ChatMessage(
+                            textMessage(
                                 role = "system",
-                                content = "Your previous response was rejected by the API as malformed. " +
+                                text = "Your previous response was rejected by the API as malformed. " +
                                     "Reply with a SINGLE short tool call. Do not embed long text or newlines " +
                                     "in tool arguments. Keep `text` arguments under 500 characters and " +
                                     "without literal newline characters.",
@@ -123,28 +125,47 @@ class Agent(
                         return
                     }
                 val msg = choice.message
-                msg.content?.takeIf { it.isNotBlank() }?.let {
+                msg.contentText?.takeIf { it.isNotBlank() }?.let {
                     onLog(AgentLog.Assistant(it))
                 }
                 messages.add(msg)
                 val toolCalls = msg.toolCalls.orEmpty()
                 if (toolCalls.isEmpty()) {
-                    onLog(AgentLog.Done(msg.content ?: "(остановлено без вызова инструмента)", success = true))
+                    onLog(AgentLog.Done(msg.contentText ?: "(остановлено без вызова инструмента)", success = true))
                     return
                 }
                 var sawDone = false
                 for (call in toolCalls) {
-                    val result = executeTool(service, call, lastScreenState)
+                    // Each tool is wrapped in its own try/catch so a buggy tool argument or an
+                    // exception inside the implementation cannot kill the loop. The error is
+                    // returned to the model as a normal tool result so it can recover.
+                    val result = try {
+                        executeTool(service, call, lastScreenState)
+                    } catch (e: Throwable) {
+                        Log.e(TAG, "Tool ${call.function.name} threw", e)
+                        ToolResult.error("Исключение в инструменте ${call.function.name}: ${e.message ?: e::class.java.simpleName}")
+                    }
                     lastScreenState = result.newScreenState ?: lastScreenState
                     onLog(AgentLog.ToolCall(call.function.name, call.function.arguments, result.summary))
                     messages.add(
-                        ChatMessage(
+                        textMessage(
                             role = "tool",
+                            text = result.toolContent,
                             toolCallId = call.id,
                             name = call.function.name,
-                            content = result.toolContent,
                         ),
                     )
+                    // When vision-mode is on AND the tool produced a screenshot, attach it as a
+                    // user message so the model actually "sees" the screen. Vision-capable
+                    // models (Llama-4 Scout/Maverick on Groq, GPT-4o on OpenAI) accept this format.
+                    if (settings.sendScreenshots && result.imageDataUrl != null) {
+                        messages.add(
+                            userImageMessage(
+                                text = "Текущий скриншот (после инструмента ${call.function.name}):",
+                                imageDataUrl = result.imageDataUrl,
+                            ),
+                        )
+                    }
                     if (result.done != null) {
                         sawDone = true
                         onLog(AgentLog.Done(result.done.summary, result.done.success))
@@ -185,10 +206,20 @@ class Agent(
         return when (call.function.name) {
             "read_screen" -> {
                 val state = service.captureScreenState()
+                // Try to also grab a bitmap so a vision model can SEE the screen — Accessibility
+                // alone misses everything that's drawn into a SurfaceView (most games, video
+                // players, and OpenGL apps).
+                val bitmap = if (settings.sendScreenshots) throttleAndCapture(service) else null
+                val hint = if (state.nodes.isEmpty()) {
+                    "\n[hint] Accessibility tree пуст — приложение скорее всего рендерит в SurfaceView " +
+                        "(игра / видео / WebGL). Вызови read_screen_text для OCR или " +
+                        "take_screenshot если включён vision-режим."
+                } else ""
                 ToolResult(
-                    toolContent = "Foreground app: ${state.packageName}\n${state.description}",
+                    toolContent = "Foreground app: ${state.packageName}\n${state.description}$hint",
                     summary = "экран считан → ${state.nodes.size} элементов",
                     newScreenState = state,
+                    imageDataUrl = bitmap?.let { bitmapToDataUrl(it) },
                 )
             }
             "read_screen_text" -> {
@@ -204,6 +235,7 @@ class Agent(
                     ToolResult(
                         toolContent = "Foreground app: ${service.captureScreenState().packageName}\n--- OCR ---\n$text",
                         summary = "OCR: ${text.length} символов",
+                        imageDataUrl = if (settings.sendScreenshots) bitmapToDataUrl(bitmap) else null,
                     )
                 }
             }
@@ -216,6 +248,7 @@ class Agent(
                     ToolResult(
                         toolContent = "Saved screenshot to $path",
                         summary = "сохранён скриншот: $path",
+                        imageDataUrl = if (settings.sendScreenshots) bitmapToDataUrl(bitmap) else null,
                     )
                 }
             }
@@ -587,6 +620,28 @@ class Agent(
         return file.absolutePath
     }
 
+    /**
+     * Encode a bitmap as a `data:image/jpeg;base64,...` URL after downscaling so the longest side
+     * is at most [Settings.screenshotMaxDim] pixels. JPEG is used for ~10× smaller payload than
+     * PNG at quality 80, which dramatically reduces upload size and token usage.
+     */
+    private fun bitmapToDataUrl(bitmap: Bitmap): String {
+        val maxDim = settings.screenshotMaxDim.coerceAtLeast(256)
+        val scale = (maxDim.toFloat() / maxOf(bitmap.width, bitmap.height)).coerceAtMost(1f)
+        val target = if (scale < 1f) {
+            Bitmap.createScaledBitmap(
+                bitmap,
+                (bitmap.width * scale).toInt().coerceAtLeast(1),
+                (bitmap.height * scale).toInt().coerceAtLeast(1),
+                true,
+            )
+        } else bitmap
+        val out = java.io.ByteArrayOutputStream()
+        target.compress(Bitmap.CompressFormat.JPEG, 80, out)
+        val b64 = android.util.Base64.encodeToString(out.toByteArray(), android.util.Base64.NO_WRAP)
+        return "data:image/jpeg;base64,$b64"
+    }
+
     private fun computeSwipe(direction: String, distance: String): IntArray {
         val service = AgentAccessibilityService.instance
         val metrics = service?.resources?.displayMetrics
@@ -633,9 +688,9 @@ class Agent(
 You have these tools:
 
 VISION
-- read_screen        → list the active app and its interactive UI nodes (use first; fast).
+- read_screen        → list the active app and its interactive UI nodes (use first; fast). When vision-mode is enabled the same call also delivers the screen as an image to the next turn, so you can really SEE the pixels — even of games / SurfaceView apps where the a11y tree is empty.
 - read_screen_text   → on-device OCR of the current screen pixels (slower; use when read_screen returns nothing useful, e.g. inside games / video players that draw to a SurfaceView).
-- take_screenshot    → save a PNG of the current screen to disk and return its path.
+- take_screenshot    → save a PNG of the current screen to disk and return its path. With vision-mode it also delivers the screen image to the next turn.
 
 ACTUATION
 - tap / tap_at / swipe / swipe_at / type_text → interact with the UI.
@@ -697,6 +752,9 @@ internal data class ToolResult(
     val summary: String,
     val newScreenState: ScreenState? = null,
     val done: DoneSignal? = null,
+    /** Optional `data:image/...;base64,...` URL. When set AND settings.sendScreenshots is true,
+     *  the agent loop appends an extra user message with this image so vision models see it. */
+    val imageDataUrl: String? = null,
 ) {
     companion object {
         fun error(message: String): ToolResult = ToolResult(

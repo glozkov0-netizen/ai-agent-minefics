@@ -48,6 +48,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             fileAccessMode = settings.fileAccessMode,
             allowedFolders = settings.allowedFolders.toList(),
             overlayAlpha = settings.overlayAlpha,
+            sendScreenshots = settings.sendScreenshots,
+            screenshotMaxDim = settings.screenshotMaxDim,
         ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -149,6 +151,38 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun updateOverlayAlpha(value: Float) {
         settings.overlayAlpha = value
         _state.update { it.copy(overlayAlpha = value) }
+    }
+
+    fun updateSendScreenshots(value: Boolean) {
+        settings.sendScreenshots = value
+        _state.update { it.copy(sendScreenshots = value) }
+    }
+
+    fun updateScreenshotMaxDim(value: Int) {
+        settings.screenshotMaxDim = value.coerceAtLeast(256)
+        _state.update { it.copy(screenshotMaxDim = settings.screenshotMaxDim) }
+    }
+
+    fun copyLogToClipboard() {
+        val app = getApplication<Application>()
+        val text = _state.value.log.joinToString("\n") { entry ->
+            when (entry) {
+                is LogEntry.System -> "[${entry.time}] СИСТЕМА: ${entry.text}"
+                is LogEntry.Thinking -> "[${entry.time}] ШАГ ${entry.step}: думаю…"
+                is LogEntry.Assistant -> "[${entry.time}] АГЕНТ: ${entry.text}"
+                is LogEntry.Tool -> "[${entry.time}] ИНСТРУМЕНТ ${entry.name}(${entry.arguments}) → ${entry.summary}"
+                is LogEntry.AskUser -> "[${entry.time}] ВОПРОС: ${entry.question}"
+                is LogEntry.Done -> "[${entry.time}] ${if (entry.success) "ГОТОВО" else "ПРЕРВАНО"}: ${entry.summary}"
+                is LogEntry.Error -> "[${entry.time}] ОШИБКА: ${entry.message}"
+            }
+        }
+        val cm = app.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+            as android.content.ClipboardManager
+        cm.setPrimaryClip(android.content.ClipData.newPlainText("ai-agent log", text))
+    }
+
+    fun clearLog() {
+        _state.update { it.copy(log = emptyList()) }
     }
 
     fun addAllowedFolder(uri: String) {
@@ -360,6 +394,8 @@ data class UiState(
     val fileAccessMode: String = "saf",
     val allowedFolders: List<String> = emptyList(),
     val overlayAlpha: Float = 0.5f,
+    val sendScreenshots: Boolean = false,
+    val screenshotMaxDim: Int = 1024,
 
     // Runtime permission status.
     val overlayGranted: Boolean = false,

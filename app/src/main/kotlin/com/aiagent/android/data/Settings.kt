@@ -90,6 +90,21 @@ class Settings(context: Context) {
         get() = prefs.getFloat(KEY_OVERLAY_ALPHA, DEFAULT_OVERLAY_ALPHA)
         set(value) = prefs.edit { putFloat(KEY_OVERLAY_ALPHA, value) }
 
+    /**
+     * When true, the agent attaches a downscaled screenshot to the next user message every time
+     * `read_screen` / `take_screenshot` runs. Requires a vision-capable model
+     * (e.g. meta-llama/llama-4-scout-17b-16e-instruct on Groq, gpt-4o on OpenAI).
+     * Text-only models will reject the request.
+     */
+    var sendScreenshots: Boolean
+        get() = prefs.getBoolean(KEY_SEND_SCREENSHOTS, DEFAULT_SEND_SCREENSHOTS)
+        set(value) = prefs.edit { putBoolean(KEY_SEND_SCREENSHOTS, value) }
+
+    /** Maximum dimension (px) for screenshots sent to the model. Smaller = fewer tokens. */
+    var screenshotMaxDim: Int
+        get() = prefs.getInt(KEY_SCREENSHOT_MAX_DIM, DEFAULT_SCREENSHOT_MAX_DIM)
+        set(value) = prefs.edit { putInt(KEY_SCREENSHOT_MAX_DIM, value) }
+
     companion object {
         const val PREFS_NAME = "agent_prefs"
         const val DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
@@ -108,6 +123,8 @@ class Settings(context: Context) {
         const val DEFAULT_TTS_RATE = 1.0f
         const val DEFAULT_FILE_MODE = "saf"
         const val DEFAULT_OVERLAY_ALPHA = 0.5f
+        const val DEFAULT_SEND_SCREENSHOTS = false
+        const val DEFAULT_SCREENSHOT_MAX_DIM = 1024
 
         private const val KEY_API = "api_key"
         private const val KEY_BASE_URL = "base_url"
@@ -126,5 +143,7 @@ class Settings(context: Context) {
         private const val KEY_FILE_MODE = "file_mode"
         private const val KEY_ALLOWED_FOLDERS = "allowed_folders"
         private const val KEY_OVERLAY_ALPHA = "overlay_alpha"
+        private const val KEY_SEND_SCREENSHOTS = "send_screenshots"
+        private const val KEY_SCREENSHOT_MAX_DIM = "screenshot_max_dim"
     }
 }

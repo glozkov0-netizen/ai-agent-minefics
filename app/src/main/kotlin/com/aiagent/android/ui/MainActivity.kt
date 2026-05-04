@@ -24,11 +24,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -40,6 +42,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
@@ -194,6 +197,8 @@ fun AppRoot(
                     onInstruction = viewModel::updateInstruction,
                     onRun = viewModel::runAgent,
                     onCancel = viewModel::cancelAgent,
+                    onCopyLog = viewModel::copyLogToClipboard,
+                    onClearLog = viewModel::clearLog,
                     onPendingAnswer = viewModel::updatePendingAnswer,
                     onSubmitAnswer = viewModel::submitAnswer,
                     onAllowProjection = onRequestProjection,
@@ -208,6 +213,8 @@ fun AppRoot(
                     state = state,
                     onApiKey = viewModel::updateApiKey,
                     onBaseUrl = viewModel::updateBaseUrl,
+                    onSendScreenshots = viewModel::updateSendScreenshots,
+                    onScreenshotMaxDim = viewModel::updateScreenshotMaxDim,
                     onModel = viewModel::updateModel,
                     onMaxSteps = viewModel::updateMaxSteps,
                     onTemperature = viewModel::updateTemperature,
@@ -246,6 +253,8 @@ fun AgentTab(
     onInstruction: (String) -> Unit,
     onRun: () -> Unit,
     onCancel: () -> Unit,
+    onCopyLog: () -> Unit,
+    onClearLog: () -> Unit,
     onPendingAnswer: (String) -> Unit,
     onSubmitAnswer: () -> Unit,
     onAllowProjection: () -> Unit,
@@ -367,17 +376,40 @@ fun AgentTab(
             }
         }
         Spacer(Modifier.height(12.dp))
-        Text("Журнал", style = MaterialTheme.typography.titleMedium)
-        LazyColumn(
-            state = listState,
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "Журнал",
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.weight(1f),
+            )
+            OutlinedButton(
+                onClick = onCopyLog,
+                enabled = state.log.isNotEmpty(),
+            ) { Text("Копировать всё") }
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(
+                onClick = onClearLog,
+                enabled = state.log.isNotEmpty(),
+            ) { Text("Очистить") }
+        }
+        SelectionContainer(
             modifier = Modifier
                 .fillMaxWidth()
-                .weight(1f)
-                .background(Color(0xFFF5F5F5), RoundedCornerShape(8.dp))
-                .padding(8.dp),
+                .weight(1f),
         ) {
-            items(state.log) { entry ->
-                LogRow(entry)
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color(0xFFF5F5F5), RoundedCornerShape(8.dp))
+                    .padding(8.dp),
+            ) {
+                items(state.log) { entry ->
+                    LogRow(entry)
+                }
             }
         }
     }
@@ -420,6 +452,8 @@ fun SettingsTab(
     onTtsRate: (Float) -> Unit,
     onAudioSource: (String) -> Unit,
     onOverlayAlpha: (Float) -> Unit,
+    onSendScreenshots: (Boolean) -> Unit,
+    onScreenshotMaxDim: (Int) -> Unit,
 ) {
     val scrollState = rememberScrollState()
     Column(
@@ -563,6 +597,44 @@ fun SettingsTab(
             valueRange = 0.1f..1.0f,
             modifier = Modifier.fillMaxWidth(),
         )
+
+        Spacer(Modifier.height(8.dp))
+        Text("Зрение модели (vision)", style = MaterialTheme.typography.titleMedium)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Switch(
+                checked = state.sendScreenshots,
+                onCheckedChange = onSendScreenshots,
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(
+                if (state.sendScreenshots) "Отправлять скриншоты в модель"
+                else "Скриншоты не отправляются (только текст)",
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Text(
+            "Включай ТОЛЬКО для vision-моделей. На Groq это: " +
+                "meta-llama/llama-4-scout-17b-16e-instruct, " +
+                "meta-llama/llama-4-maverick-17b-128e-instruct. " +
+                "Текстовая openai/gpt-oss-120b картинки НЕ принимает и вернёт 400.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (state.sendScreenshots) {
+            Text(
+                "Размер скриншота: ${state.screenshotMaxDim} px (макс. сторона)",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            Slider(
+                value = state.screenshotMaxDim.toFloat(),
+                onValueChange = { onScreenshotMaxDim(it.toInt()) },
+                valueRange = 384f..1536f,
+                steps = 7,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
 
         Text(
             "Поддерживается любой OpenAI-совместимый chat completions API с tool calling. Примеры: " +
