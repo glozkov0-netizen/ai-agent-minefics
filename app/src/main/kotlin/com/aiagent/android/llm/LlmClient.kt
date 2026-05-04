@@ -5,6 +5,7 @@ import io.ktor.client.call.body
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
@@ -75,6 +76,24 @@ class LlmClient(
     private fun extractRetryDelay(message: String): Double? {
         val regex = Regex("""try again in ([0-9]+(?:\.[0-9]+)?)s""", RegexOption.IGNORE_CASE)
         return regex.find(message)?.groupValues?.get(1)?.toDoubleOrNull()
+    }
+
+    /**
+     * GET `{baseUrl}/models` (OpenAI-compatible). Returns model IDs.
+     */
+    suspend fun listModels(): List<String> {
+        val url = baseUrl.trimEnd('/') + "/models"
+        val response: HttpResponse = client.get(url) {
+            if (apiKey.isNotBlank()) {
+                header("Authorization", "Bearer $apiKey")
+            }
+        }
+        if (response.status != HttpStatusCode.OK) {
+            val body = response.bodyAsText()
+            throw LlmException("HTTP ${response.status.value}: ${body.take(500)}")
+        }
+        val parsed = response.body<ModelListResponse>()
+        return parsed.data.map { it.id }.distinct().sorted()
     }
 
     fun close() = client.close()

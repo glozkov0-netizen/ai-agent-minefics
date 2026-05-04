@@ -142,6 +142,20 @@ data class ApiErrorBody(
 )
 
 @Serializable
+data class ModelListResponse(
+    val data: List<ModelInfo> = emptyList(),
+)
+
+@Serializable
+data class ModelInfo(
+    val id: String,
+    @SerialName("owned_by") val ownedBy: String? = null,
+    val created: Long? = null,
+    @SerialName("active") val active: Boolean? = null,
+    @SerialName("context_window") val contextWindow: Int? = null,
+)
+
+@Serializable
 data class ApiError(
     val message: String? = null,
     val type: String? = null,

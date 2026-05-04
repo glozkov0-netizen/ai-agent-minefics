@@ -35,6 +35,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -51,6 +53,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -197,6 +200,7 @@ fun AppRoot(
                     onInstruction = viewModel::updateInstruction,
                     onRun = viewModel::runAgent,
                     onCancel = viewModel::cancelAgent,
+                    onResetConversation = viewModel::resetConversation,
                     onCopyLog = viewModel::copyLogToClipboard,
                     onClearLog = viewModel::clearLog,
                     onPendingAnswer = viewModel::updatePendingAnswer,
@@ -226,6 +230,7 @@ fun AppRoot(
                     onTtsRate = viewModel::updateTtsRate,
                     onAudioSource = viewModel::updateAudioSource,
                     onOverlayAlpha = viewModel::updateOverlayAlpha,
+                    onFetchModels = viewModel::fetchModelList,
                 )
                 2 -> PermissionsTab(
                     state = state,
@@ -253,6 +258,7 @@ fun AgentTab(
     onInstruction: (String) -> Unit,
     onRun: () -> Unit,
     onCancel: () -> Unit,
+    onResetConversation: () -> Unit,
     onCopyLog: () -> Unit,
     onClearLog: () -> Unit,
     onPendingAnswer: (String) -> Unit,
@@ -298,22 +304,43 @@ fun AgentTab(
             enabled = !state.running,
         )
         Spacer(Modifier.height(8.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            if (state.running) {
-                Button(
-                    onClick = onCancel,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFFC62828),
-                        contentColor = Color.White,
-                    ),
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("■  СТОП  Будет прерван текущий шаг") }
-            } else {
+        if (state.running) {
+            Button(
+                onClick = onCancel,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFC62828),
+                    contentColor = Color.White,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("■  СТОП  Прервать текущий шаг") }
+            Text(
+                "Кнопка СТОП также видна поверх любого приложения — её можно нажать в игре.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 Button(
                     onClick = onRun,
                     enabled = state.instruction.isNotBlank(),
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text("▶  Запустить") }
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (state.hasConversation) "▶  Продолжить" else "▶  Запустить")
+                }
+                if (state.hasConversation) {
+                    OutlinedButton(
+                        onClick = onResetConversation,
+                    ) { Text("Начать заново") }
+                }
+            }
+            if (state.hasConversation) {
+                Text(
+                    "Диалог сохранён. «Продолжить» добавит твоё сообщение к существующей беседе. " +
+                        "«Начать заново» сбросит историю.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
         }
         if (state.pendingQuestion != null) {
@@ -454,6 +481,7 @@ fun SettingsTab(
     onOverlayAlpha: (Float) -> Unit,
     onSendScreenshots: (Boolean) -> Unit,
     onScreenshotMaxDim: (Int) -> Unit,
+    onFetchModels: () -> Unit,
 ) {
     val scrollState = rememberScrollState()
     Column(
@@ -477,6 +505,7 @@ fun SettingsTab(
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
         )
+        var modelDropdownOpen by remember { mutableStateOf(false) }
         OutlinedTextField(
             value = state.model,
             onValueChange = onModel,
@@ -484,6 +513,51 @@ fun SettingsTab(
             modifier = Modifier.fillMaxWidth(),
             singleLine = true,
         )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedButton(
+                onClick = {
+                    onFetchModels()
+                    modelDropdownOpen = true
+                },
+                enabled = !state.modelsLoading && state.apiKey.isNotBlank() && state.baseUrl.isNotBlank(),
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(
+                    if (state.modelsLoading) "Загружаю…"
+                    else if (state.availableModels.isEmpty()) "Загрузить список моделей"
+                    else "Список моделей (${state.availableModels.size})",
+                )
+            }
+            if (state.availableModels.isNotEmpty()) {
+                Box {
+                    OutlinedButton(onClick = { modelDropdownOpen = true }) { Text("Выбрать ▾") }
+                    DropdownMenu(
+                        expanded = modelDropdownOpen,
+                        onDismissRequest = { modelDropdownOpen = false },
+                    ) {
+                        state.availableModels.forEach { id ->
+                            DropdownMenuItem(
+                                text = { Text(id) },
+                                onClick = {
+                                    onModel(id)
+                                    modelDropdownOpen = false
+                                },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        if (state.modelsError != null) {
+            Text(
+                "Ошибка загрузки: ${state.modelsError}",
+                color = Color(0xFFC62828),
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
 
         Spacer(Modifier.height(4.dp))
         Text("Генерация", style = MaterialTheme.typography.titleMedium)

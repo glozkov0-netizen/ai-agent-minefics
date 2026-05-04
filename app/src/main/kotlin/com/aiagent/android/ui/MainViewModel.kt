@@ -14,6 +14,9 @@ import androidx.lifecycle.viewModelScope
 import com.aiagent.android.agent.Agent
 import com.aiagent.android.agent.AgentLog
 import com.aiagent.android.data.Settings
+import com.aiagent.android.llm.ChatMessage
+import com.aiagent.android.llm.LlmClient
+import com.aiagent.android.overlay.OverlayService
 import com.aiagent.android.service.AgentAccessibilityService
 import com.aiagent.android.service.ScreenRecorderService
 import kotlinx.coroutines.Job
@@ -58,8 +61,21 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var pendingAnswerChannel: Channel<String>? = null
     private var pendingProjectionChannel: Channel<ProjectionGrant>? = null
 
+    /**
+     * The persistent chat history shared across `runAgent()` calls so the user can press
+     * "Продолжить" without losing context. Cleared by [resetConversation].
+     */
+    private val conversation: MutableList<ChatMessage> = mutableListOf()
+
     init {
         refreshPermissionStatus()
+        // Wire the overlay STOP button click into the same code path as the in-app cancel.
+        OverlayService.stopListener = { cancelAgent() }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        OverlayService.stopListener = null
     }
 
     fun refreshServiceStatus() {
@@ -209,20 +225,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(instruction = value) }
     }
 
+    /**
+     * Start (or resume) the agent. If [conversation] already has prior messages, the new
+     * instruction is appended and the loop continues from where it left off ("Продолжить");
+     * otherwise the loop starts fresh. Use [resetConversation] to clear history.
+     */
     fun runAgent() {
         val instruction = _state.value.instruction.trim()
         if (instruction.isEmpty()) return
         if (_state.value.running) return
         refreshServiceStatus()
+        val isResume = conversation.isNotEmpty()
         _state.update {
             it.copy(
                 running = true,
-                log = emptyList(),
                 pendingQuestion = null,
                 pendingAnswer = "",
+                hasConversation = true,
             )
         }
-        appendLog(LogEntry.System("Запуск агента: $instruction"))
+        appendLog(
+            LogEntry.System(
+                if (isResume) "Продолжаю: $instruction"
+                else "Запуск агента: $instruction",
+            ),
+        )
+
+        // Show the persistent overlay STOP button. Only the user can stop the agent.
+        OverlayService.showStop(getApplication())
 
         val agent = Agent(
             getApplication(),
@@ -232,14 +262,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             stopScreenRecording = { stopScreenRecording() },
         ) { entry -> appendAgentLog(entry) }
 
+        // Clear the input field so the user knows the message was accepted.
+        _state.update { it.copy(instruction = "") }
+
         currentJob = viewModelScope.launch {
             try {
-                agent.run(instruction)
+                agent.run(instruction, conversation)
             } finally {
                 _state.update { it.copy(running = false, pendingQuestion = null) }
                 pendingAnswerChannel?.close()
                 pendingAnswerChannel = null
-                appendLog(LogEntry.System("Агент завершил работу."))
+                OverlayService.hideStop(getApplication())
+                appendLog(LogEntry.System("Агент остановлен. История сохранена — нажми «Продолжить» для нового сообщения."))
             }
         }
     }
@@ -252,7 +286,50 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         pendingProjectionChannel?.close()
         pendingProjectionChannel = null
         _state.update { it.copy(running = false, pendingQuestion = null, pendingProjection = false) }
+        OverlayService.hideStop(getApplication())
         appendLog(LogEntry.System("Прервано пользователем."))
+    }
+
+    /** Clear the persisted conversation so the next run starts fresh. */
+    fun resetConversation() {
+        conversation.clear()
+        _state.update {
+            it.copy(
+                hasConversation = false,
+                log = emptyList(),
+            )
+        }
+        appendLog(LogEntry.System("История диалога очищена."))
+    }
+
+    private val _availableModels = MutableStateFlow<List<String>>(emptyList())
+    val availableModels: StateFlow<List<String>> = _availableModels.asStateFlow()
+
+    /** Fetch the provider's `/models` list and expose them as a dropdown. */
+    fun fetchModelList() {
+        if (_state.value.modelsLoading) return
+        _state.update { it.copy(modelsLoading = true, modelsError = null) }
+        val baseUrl = settings.baseUrl
+        val apiKey = settings.apiKey
+        viewModelScope.launch {
+            val client = LlmClient(baseUrl, apiKey)
+            try {
+                val ids = client.listModels()
+                _availableModels.value = ids
+                _state.update { it.copy(modelsLoading = false, availableModels = ids) }
+                appendLog(LogEntry.System("Загружено моделей: ${ids.size}"))
+            } catch (e: Exception) {
+                _state.update {
+                    it.copy(
+                        modelsLoading = false,
+                        modelsError = e.message ?: e::class.java.simpleName,
+                    )
+                }
+                appendLog(LogEntry.Error("Не удалось загрузить модели: ${e.message}"))
+            } finally {
+                client.close()
+            }
+        }
     }
 
     fun updatePendingAnswer(value: String) {
@@ -401,6 +478,14 @@ data class UiState(
     val overlayGranted: Boolean = false,
     val manageStorageGranted: Boolean = false,
     val micGranted: Boolean = false,
+
+    // Conversation / model picker.
+    /** True once the user has run at least one instruction. Switches the run button label
+     *  from "Запустить" to "Продолжить" and reveals the "Начать заново" button. */
+    val hasConversation: Boolean = false,
+    val availableModels: List<String> = emptyList(),
+    val modelsLoading: Boolean = false,
+    val modelsError: String? = null,
 )
 
 data class ProjectionGrant(val resultCode: Int, val data: Intent?)

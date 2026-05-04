@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
@@ -26,12 +27,12 @@ import kotlinx.coroutines.CompletableDeferred
  * Floating overlay window used by the agent to:
  *   - ask the user a yes/no question (`SHOW_QUESTION`)
  *   - show transient status (`SHOW_STATUS`)
- *
- * The window is draggable, occupies a small fraction of the screen, and is rendered at the
- * opacity stored in [Settings.overlayAlpha] (default 0.5 = 50% as the user requested).
- *
- * Communication with the agent is via the [Pending] singleton: the agent publishes a
- * [CompletableDeferred] before launching the service and the user's choice is delivered into it.
+ *   - render a persistent **STOP button** that is the ONLY way the user can terminate the agent.
+ *     The agent itself cannot exit; the model's `done` tool is logged but ignored. The button is
+ *     a separate, draggable overlay window placed above all apps; the AI cannot tap it because:
+ *       a) `dispatchGesture` would have to reach the overlay's window which it can but
+ *       b) we publish the on-screen bounds via [stopButtonBounds] and `tap_at` / `swipe_at`
+ *          refuse to dispatch when the target falls inside that rectangle.
  */
 class OverlayService : Service() {
 
@@ -44,6 +45,8 @@ class OverlayService : Service() {
     private var openButton: Button? = null
     private var dismissButton: Button? = null
 
+    private var stopRoot: View? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -51,6 +54,8 @@ class OverlayService : Service() {
             ACTION_SHOW_QUESTION -> showQuestion(intent.getStringExtra(EXTRA_TEXT) ?: "")
             ACTION_SHOW_STATUS -> showStatus(intent.getStringExtra(EXTRA_TEXT) ?: "")
             ACTION_HIDE -> hideAll()
+            ACTION_SHOW_STOP -> showStopButton()
+            ACTION_HIDE_STOP -> hideStopButton()
         }
         return START_NOT_STICKY
     }
@@ -197,6 +202,107 @@ class OverlayService : Service() {
         runCatching { windowManager?.addView(view, params) }
     }
 
+    @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
+    private fun showStopButton() {
+        if (stopRoot != null) return
+        val ctx: Context = this
+        windowManager = windowManager ?: getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+        val btn = Button(ctx).apply {
+            text = "🛑 СТОП"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(20).toFloat()
+                setColor(Color.parseColor("#C62828"))
+                setStroke(dp(2), Color.WHITE)
+            }
+            setPadding(dp(20), dp(10), dp(20), dp(10))
+            setOnClickListener {
+                // Fire the registered ViewModel callback. The button stays visible until the
+                // ViewModel asks us to hide it (after it has cancelled the agent job).
+                runCatching { stopListener?.invoke() }
+            }
+        }
+
+        val type = if (Build.VERSION.SDK_INT >= 26) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        }
+        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        val params = WindowManager.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            type,
+            flags,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = dp(12)
+            y = dp(80)
+        }
+
+        // Make the stop button draggable too — user requested "configurable".
+        var startX = 0
+        var startY = 0
+        var rawX = 0f
+        var rawY = 0f
+        var dragged = false
+        btn.setOnTouchListener { _, ev ->
+            val lp = btn.layoutParams as? WindowManager.LayoutParams ?: return@setOnTouchListener false
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    startX = lp.x; startY = lp.y; rawX = ev.rawX; rawY = ev.rawY; dragged = false
+                    false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (ev.rawX - rawX).toInt()
+                    val dy = (ev.rawY - rawY).toInt()
+                    if (kotlin.math.abs(dx) > dp(6) || kotlin.math.abs(dy) > dp(6)) {
+                        dragged = true
+                        // For Gravity.TOP|END, x grows toward the LEFT edge.
+                        lp.x = (startX - dx).coerceAtLeast(0)
+                        lp.y = (startY + dy).coerceAtLeast(0)
+                        runCatching { windowManager?.updateViewLayout(btn, lp) }
+                        updateStopButtonBounds(btn)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (dragged) true else false // consume only if dragged, else let click fire
+                }
+                else -> false
+            }
+        }
+        runCatching { windowManager?.addView(btn, params) }
+        stopRoot = btn
+        // Capture bounds once layout is done.
+        btn.post { updateStopButtonBounds(btn) }
+    }
+
+    private fun updateStopButtonBounds(view: View) {
+        val loc = IntArray(2)
+        view.getLocationOnScreen(loc)
+        stopButtonBounds = Rect(
+            loc[0],
+            loc[1],
+            loc[0] + view.width,
+            loc[1] + view.height,
+        )
+    }
+
+    private fun hideStopButton() {
+        val v = stopRoot
+        if (v != null) {
+            runCatching { windowManager?.removeView(v) }
+        }
+        stopRoot = null
+        stopButtonBounds = null
+    }
+
     private fun hideAll() {
         val view = rootView
         if (view != null) {
@@ -214,6 +320,7 @@ class OverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         hideAll()
+        hideStopButton()
     }
 
     private fun deliver(value: String) {
@@ -240,7 +347,18 @@ class OverlayService : Service() {
         const val ACTION_SHOW_QUESTION = "com.aiagent.android.OVERLAY_QUESTION"
         const val ACTION_SHOW_STATUS = "com.aiagent.android.OVERLAY_STATUS"
         const val ACTION_HIDE = "com.aiagent.android.OVERLAY_HIDE"
+        const val ACTION_SHOW_STOP = "com.aiagent.android.OVERLAY_SHOW_STOP"
+        const val ACTION_HIDE_STOP = "com.aiagent.android.OVERLAY_HIDE_STOP"
         const val EXTRA_TEXT = "text"
+
+        /** Screen-space bounds of the persistent STOP button while it's visible. Used by
+         *  AgentAccessibilityService to refuse `tap_at` / `swipe_at` calls that would land on it. */
+        @Volatile
+        var stopButtonBounds: Rect? = null
+
+        /** Invoked when the user taps the persistent STOP overlay button. Set by MainViewModel. */
+        @Volatile
+        var stopListener: (() -> Unit)? = null
 
         fun showQuestion(context: Context, text: String) {
             val intent = Intent(context, OverlayService::class.java).apply {
@@ -263,6 +381,16 @@ class OverlayService : Service() {
             context.startService(intent)
         }
 
+        fun showStop(context: Context) {
+            val intent = Intent(context, OverlayService::class.java).apply { action = ACTION_SHOW_STOP }
+            context.startService(intent)
+        }
+
+        fun hideStop(context: Context) {
+            val intent = Intent(context, OverlayService::class.java).apply { action = ACTION_HIDE_STOP }
+            context.startService(intent)
+        }
+
         /**
          * Apply window-level brightness to the overlay view (if currently shown). `value` should be
          * in [0..1] for an explicit level or -1 to follow system. Has no effect when the overlay
@@ -270,10 +398,6 @@ class OverlayService : Service() {
          * apps without WRITE_SETTINGS, which is intentionally not declared.
          */
         fun applyBrightness(@Suppress("UNUSED_PARAMETER") context: Context, value: Float) {
-            // Stored for the next time the overlay is shown. We don't push it to a live window
-            // here because the WindowManager handle is private to the running service instance —
-            // and pulling brightness changes through a service intent is overkill for what is
-            // basically a UX nicety. The overlay reads this value when it ensures its view.
             pendingBrightness = value
         }
 

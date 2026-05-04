@@ -68,7 +68,20 @@ class Agent(
 
     @Volatile private var lastScreenshotMs: Long = 0L
 
-    suspend fun run(userInstruction: String) {
+    /**
+     * Run the agent loop using an externally-owned conversation list. The caller (typically
+     * MainViewModel) keeps this list across runs so the user can press "Продолжить" without
+     * losing previous context. When [conversation] is empty we seed it with system+user; when
+     * it already has content we just append the new user instruction and continue.
+     *
+     * The loop is "user-only-exit": it never returns voluntarily because the model said it was
+     * done. The only way out is a CancellationException (user pressed the overlay STOP button)
+     * or the [Settings.maxSteps] hard cap.
+     */
+    suspend fun run(
+        userInstruction: String,
+        conversation: MutableList<ChatMessage>,
+    ) {
         val service = AgentAccessibilityService.instance
         if (service == null) {
             onLog(AgentLog.Error("Служба Спецвозможностей не запущена. Включите в Настройки Android → Спецвозможности → AI Agent."))
@@ -81,11 +94,18 @@ class Agent(
 
         val client = LlmClient(settings.baseUrl, settings.apiKey)
         val systemPrompt = settings.systemPrompt.takeIf { it.isNotBlank() } ?: SYSTEM_PROMPT
-        val messages = mutableListOf<ChatMessage>(
-            textMessage(role = "system", text = systemPrompt),
-            textMessage(role = "user", text = userInstruction),
-        )
+        if (conversation.isEmpty()) {
+            conversation.add(textMessage(role = "system", text = systemPrompt))
+        }
+        if (userInstruction.isNotBlank()) {
+            conversation.add(textMessage(role = "user", text = userInstruction))
+        }
+        val messages = conversation
         var lastScreenState: ScreenState? = null
+        // Counter for consecutive turns where the model produced no tool calls. We don't actually
+        // exit when this happens; instead we nudge the model and keep going. But to avoid spinning
+        // forever burning API credit we hard-cap idle iterations.
+        var idleStreak = 0
 
         try {
             for (step in 1..settings.maxSteps) {
@@ -131,10 +151,29 @@ class Agent(
                 messages.add(msg)
                 val toolCalls = msg.toolCalls.orEmpty()
                 if (toolCalls.isEmpty()) {
-                    onLog(AgentLog.Done(msg.contentText ?: "(остановлено без вызова инструмента)", success = true))
-                    return
+                    // The model didn't call any tool. We do NOT exit here — the user explicitly
+                    // requested user-only-exit. Instead we nudge the model and loop.
+                    idleStreak++
+                    if (idleStreak >= 3) {
+                        onLog(
+                            AgentLog.Error(
+                                "Модель уже 3 раза подряд не вызывает инструменты. Пауза. " +
+                                    "Нажми «Продолжить», чтобы дать новое указание, или «Стоп» в overlay.",
+                            ),
+                        )
+                        return
+                    }
+                    messages.add(
+                        textMessage(
+                            role = "system",
+                            text = "Я не получил от тебя tool call. Ты НЕ можешь сам выйти — выходит только пользователь по кнопке СТОП. " +
+                                "Продолжай помогать игроку: вызови read_screen чтобы посмотреть, что сейчас происходит, " +
+                                "или speak / ask_user_overlay чтобы задать вопрос.",
+                        ),
+                    )
+                    continue
                 }
-                var sawDone = false
+                idleStreak = 0
                 for (call in toolCalls) {
                     // Each tool is wrapped in its own try/catch so a buggy tool argument or an
                     // exception inside the implementation cannot kill the loop. The error is
@@ -167,11 +206,20 @@ class Agent(
                         )
                     }
                     if (result.done != null) {
-                        sawDone = true
+                        // The model thinks it's finished. We log it but DO NOT exit — only the
+                        // user can stop the agent by tapping the overlay STOP button. Push a
+                        // system reminder back so the model keeps helping in the next turn.
                         onLog(AgentLog.Done(result.done.summary, result.done.success))
+                        messages.add(
+                            textMessage(
+                                role = "system",
+                                text = "User wants you to stay active until they press the overlay STOP button. " +
+                                    "Don't call `done` again unless something breaks. Wait for the next user " +
+                                    "message or proactively read_screen to see if anything changed.",
+                            ),
+                        )
                     }
                 }
-                if (sawDone) return
             }
             onLog(AgentLog.Error("Достигнут лимит шагов (${settings.maxSteps}) без завершения."))
         } catch (e: Exception) {
@@ -265,6 +313,9 @@ class Agent(
             "tap_at" -> {
                 val x = args.intOf("x") ?: return ToolResult.error("Missing x")
                 val y = args.intOf("y") ?: return ToolResult.error("Missing y")
+                if (isInsideStopButton(x, y)) {
+                    return ToolResult.error("Точка ($x,$y) попадает в кнопку СТОП. Только пользователь может её нажать. Выбери другую цель.")
+                }
                 val ok = service.tap(x, y)
                 ToolResult(
                     toolContent = if (ok) "Tapped at ($x,$y)" else "Tap dispatch failed",
@@ -292,6 +343,9 @@ class Agent(
                 val y1 = args.intOf("y1") ?: return ToolResult.error("Missing y1")
                 val x2 = args.intOf("x2") ?: return ToolResult.error("Missing x2")
                 val y2 = args.intOf("y2") ?: return ToolResult.error("Missing y2")
+                if (isInsideStopButton(x1, y1) || isInsideStopButton(x2, y2)) {
+                    return ToolResult.error("Свайп пересекает кнопку СТОП — это запрещено.")
+                }
                 val duration = args.intOf("duration_ms")?.toLong() ?: 300L
                 val ok = service.swipe(x1, y1, x2, y2, duration)
                 ToolResult(
@@ -620,6 +674,15 @@ class Agent(
         return file.absolutePath
     }
 
+    /** True if the given screen-pixel point falls inside the persistent overlay STOP button.
+     *  Used to refuse tap_at / swipe_at calls so the AI cannot click its own kill switch. */
+    private fun isInsideStopButton(x: Int, y: Int): Boolean {
+        val r = OverlayService.stopButtonBounds ?: return false
+        val pad = 16
+        return x in (r.left - pad)..(r.right + pad) &&
+            y in (r.top - pad)..(r.bottom + pad)
+    }
+
     /**
      * Encode a bitmap as a `data:image/jpeg;base64,...` URL after downscaling so the longest side
      * is at most [Settings.screenshotMaxDim] pixels. JPEG is used for ~10× smaller payload than
@@ -722,7 +785,10 @@ VIDEO RECORDING
 - start_screen_recording / stop_screen_recording → MP4 of the screen via MediaProjection. The first call pauses for the system consent dialog.
 
 DONE
-- done(summary, success) → end the loop with a final report.
+- done(summary, success) → report progress on the current sub-task. **This does NOT end the agent.**
+  Only the user can stop the agent, by tapping the floating red "🛑 СТОП" button that the app
+  renders over every screen. Do not try to tap that button — `tap_at` / `swipe_at` will refuse
+  any coordinate that lands inside it.
 
 Workflow rules:
 1. For typical UI tasks, START with `read_screen`. If the foreground is a game / SurfaceView, also call `read_screen_text` for OCR.
@@ -732,7 +798,9 @@ Workflow rules:
 5. If the user asked you to read out chat or a system message that is rendered in a game / image, use `read_screen_text` to get the text first, then `speak` it.
 6. Keep `type_text` payloads under 1000 characters and avoid embedded newlines unless absolutely required.
 7. When file writes / deletions are destructive, confirm with `ask_user_overlay` first.
-8. When the task is finished, ALWAYS call `done(summary, success)`.
+8. When you finish a sub-task, call `done(summary, success)` to report it, then KEEP HELPING. The
+   user is still here. If there is nothing actionable, call `read_screen` to check on the game
+   periodically, or `ask_user_overlay` to ask what they want next.
 9. Reply in the user's language (default Russian) for user-facing strings (`speak`, `ask_user`, `ask_user_overlay`, `done.summary`).
 """
     }
