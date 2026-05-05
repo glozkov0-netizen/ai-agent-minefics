@@ -10,7 +10,9 @@ import android.graphics.Paint
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
@@ -167,6 +169,11 @@ class JoystickOverlayService : Service() {
         private var initialRadius = 0
         private var inPinch = false
 
+        // Pending long-press timer scheduled at ACTION_DOWN. Cancelled on UP / CANCEL or once
+        // the finger moves more than [moveDistanceForCancel].
+        private val handler = Handler(Looper.getMainLooper())
+        private var longPressRunnable: Runnable? = null
+
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
             val size = settings.joystickRadius * 2 + dp(20f).toInt()
             setMeasuredDimension(size, size)
@@ -209,6 +216,29 @@ class JoystickOverlayService : Service() {
                         dragging = true
                         updateThumb(dx, dy)
                         beginDispatch()
+                        // Schedule a long-press timer. Even if the user holds completely still
+                        // (no further ACTION_MOVE events), this runnable converts the active
+                        // drag into a configuration drag after `longPressMs`.
+                        cancelPendingLongPress()
+                        val r = Runnable {
+                            if (configMode) return@Runnable
+                            if (dragging) {
+                                dragging = false
+                                endDispatch()
+                                thumbDx = 0f
+                                thumbDy = 0f
+                            }
+                            configMode = true
+                            // Re-anchor at current touch so the next ACTION_MOVE delta starts
+                            // from "now" instead of the original DOWN — prevents window jump.
+                            anchorRawX = event.rawX
+                            anchorRawY = event.rawY
+                            anchorWindowX = windowParams?.x ?: 0
+                            anchorWindowY = windowParams?.y ?: 0
+                            invalidate()
+                        }
+                        handler.postDelayed(r, longPressMs)
+                        longPressRunnable = r
                     }
                 }
                 MotionEvent.ACTION_POINTER_DOWN -> {
@@ -232,16 +262,14 @@ class JoystickOverlayService : Service() {
                         }
                         return true
                     }
-                    if (!dragging && !configMode) {
-                        // Detect long-press to enter config mode.
-                        val held = System.currentTimeMillis() - longPressStart
+                    // If the finger has wandered past the threshold before the long-press
+                    // timer fired, treat this as a deliberate active-mode drag and cancel
+                    // the pending long-press so a slow drag never accidentally enters config.
+                    if (!configMode && longPressRunnable != null) {
                         val moved = hypot(event.rawX - anchorRawX, event.rawY - anchorRawY)
-                        if (held >= longPressMs && moved < moveDistanceForCancel) {
-                            configMode = true
-                            invalidate()
-                        }
-                        return true
+                        if (moved >= moveDistanceForCancel) cancelPendingLongPress()
                     }
+                    if (!configMode && !dragging) return true
                     if (configMode && !inPinch) {
                         // Drag the whole window.
                         val dx = (event.rawX - anchorRawX).toInt()
@@ -273,11 +301,11 @@ class JoystickOverlayService : Service() {
                     }
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    cancelPendingLongPress()
                     if (configMode) {
                         // A clean tap (no drag, no pinch) exits config mode.
                         val moved = hypot(event.rawX - anchorRawX, event.rawY - anchorRawY)
-                        val held = System.currentTimeMillis() - longPressStart
-                        if (!inPinch && moved < moveDistanceForCancel && held < longPressMs) {
+                        if (!inPinch && moved < moveDistanceForCancel) {
                             configMode = false
                             invalidate()
                         }
@@ -292,6 +320,11 @@ class JoystickOverlayService : Service() {
                 }
             }
             return true
+        }
+
+        private fun cancelPendingLongPress() {
+            longPressRunnable?.let { handler.removeCallbacks(it) }
+            longPressRunnable = null
         }
 
         private fun pinchDistance(event: MotionEvent): Float {

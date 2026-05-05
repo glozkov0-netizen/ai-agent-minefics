@@ -165,12 +165,19 @@ class Agent(
                 val effort = settings.reasoningEffort.takeIf {
                     it.isNotBlank() && supportsReasoningEffort(settings.model)
                 }
-                // In two-model mode the controller is text-only by design. We strip ALL images
-                // from history (replacing each with its text part / a short marker) so the
-                // controller never receives multimodal content and the provider doesn't
-                // return HTTP 400 'content must be a string'. In single-model mode we keep
+                // The controller may be text-only (e.g. `openai/gpt-oss-120b`). In ANY scenario
+                // where the controller can't accept images we strip ALL multimodal content
+                // from history so the provider doesn't return HTTP 400 'content must be a
+                // string'. The vision describer (two-model mode) is the supported way to feed
+                // pixel info to a text controller — it converts the screenshot to plain text
+                // BEFORE adding to history. In single-model + vision-capable mode we keep
                 // only the last N images to stay under Groq's 5-images-per-request cap.
-                val keepImages = if (settings.useVisionDescriber) 0 else MAX_IMAGES_IN_HISTORY
+                val controllerIsTextOnly = !supportsVision(settings.model)
+                val keepImages = if (settings.useVisionDescriber || controllerIsTextOnly) {
+                    0
+                } else {
+                    MAX_IMAGES_IN_HISTORY
+                }
                 trimOldScreenshots(messages, keep = keepImages)
                 val baseRequest = ChatRequest(
                     model = settings.model,
@@ -905,9 +912,18 @@ class Agent(
             id.contains("pixtral")
     }
 
-    /** True if the agent should attach screenshots to LLM messages this run. */
+    /**
+     * True if the agent should attach raw screenshots to controller-LLM messages this run.
+     *
+     * IMPORTANT: we only attach images when the configured *controller* model is known to be
+     * multimodal. If a user enables "send screenshots" while the controller is a text-only
+     * model (e.g. `openai/gpt-oss-120b`), Groq returns
+     * `HTTP 400: messages[N].content must be a string`. The two-model "vision describer" path
+     * is the right way to feed pixel info to a text controller — it converts the image to text
+     * via a separate vision model BEFORE the controller sees it.
+     */
     private fun visionEnabled(): Boolean =
-        settings.sendScreenshots || supportsVision(settings.model)
+        settings.sendScreenshots && supportsVision(settings.model)
 
     /**
      * Walk the conversation in reverse and keep only the [keep] most recent multimodal

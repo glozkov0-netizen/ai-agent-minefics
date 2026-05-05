@@ -477,6 +477,8 @@ class OverlayService : Service() {
     private fun rebuildSettingsPanel(panel: LinearLayout) {
         panel.removeAllViews()
         val s = Settings(this)
+        // Voice → start agent button. The most-used action when in-game.
+        addStartAgentButton(panel)
         addSettingsToggle(panel, "🕹️ Джойстик", s.joystickEnabled) { value ->
             s.joystickEnabled = value
             if (value) JoystickOverlayService.show(applicationContext)
@@ -494,6 +496,58 @@ class OverlayService : Service() {
         addSettingsToggle(panel, "🎮 Передавать жест в игру", s.joystickDispatch) { value ->
             s.joystickDispatch = value
         }
+    }
+
+    @SuppressLint("SetTextI18n")
+    private fun addStartAgentButton(parent: LinearLayout) {
+        val ctx: Context = this
+        val btn = Button(ctx).apply {
+            text = if (agentRunning) "🎤 Сказать (продолжить)" else "🎤 Сказать задачу"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(10).toFloat()
+                setColor(Color.parseColor("#4527A0"))
+            }
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+            lp.bottomMargin = dp(4)
+            layoutParams = lp
+        }
+        var listening = false
+        var listenScope: CoroutineScope? = null
+        btn.setOnClickListener {
+            if (listening) {
+                listenScope?.coroutineContext?.get(Job)?.cancel()
+                listening = false
+                btn.text = if (agentRunning) "🎤 Сказать (продолжить)" else "🎤 Сказать задачу"
+                (btn.background as? GradientDrawable)?.setColor(Color.parseColor("#4527A0"))
+                return@setOnClickListener
+            }
+            listening = true
+            btn.text = "● слушаю…  (тапни чтоб отменить)"
+            (btn.background as? GradientDrawable)?.setColor(Color.parseColor("#C62828"))
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+            listenScope = scope
+            scope.launch {
+                val transcript = try {
+                    SpeechToText(applicationContext, Settings(applicationContext)).listenLive(language = null)
+                } catch (e: Exception) {
+                    "[ошибка распознавания: ${e.message ?: e::class.java.simpleName}]"
+                }
+                listening = false
+                btn.text = if (agentRunning) "🎤 Сказать (продолжить)" else "🎤 Сказать задачу"
+                (btn.background as? GradientDrawable)?.setColor(Color.parseColor("#4527A0"))
+                if (transcript.isNotBlank() && !transcript.startsWith("[")) {
+                    runCatching { startListener?.invoke(transcript) }
+                }
+            }
+        }
+        parent.addView(btn)
     }
 
     private fun addSettingsToggle(
@@ -602,6 +656,16 @@ class OverlayService : Service() {
         /** Invoked when the user taps the persistent STOP overlay button. Set by MainViewModel. */
         @Volatile
         var stopListener: (() -> Unit)? = null
+
+        /** Invoked when the user gives a fresh voice instruction inside the floating ⚙️ panel.
+         *  The string is the (already-transcribed) instruction. Set by MainViewModel. */
+        @Volatile
+        var startListener: ((String) -> Unit)? = null
+
+        /** True while the agent is running, set by MainViewModel. The settings overlay reads
+         *  this to decide whether the action button should be "🎤 Запустить" or "▶️ Продолжить". */
+        @Volatile
+        var agentRunning: Boolean = false
 
         fun showQuestion(context: Context, text: String, options: List<String>? = null) {
             val intent = Intent(context, OverlayService::class.java).apply {

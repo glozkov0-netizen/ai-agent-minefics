@@ -79,6 +79,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         refreshPermissionStatus()
         // Wire the overlay STOP button click into the same code path as the in-app cancel.
         OverlayService.stopListener = { cancelAgent() }
+        // Wire the floating ⚙️ settings overlay's "🎤 Сказать задачу" button. The transcript
+        // becomes the new instruction; the agent runs (or resumes if it was already running).
+        OverlayService.startListener = { transcript ->
+            viewModelScope.launch {
+                val s = _state.value
+                if (s.running && s.pendingQuestion != null) {
+                    // The agent is asking a question right now — treat the voice transcript
+                    // as the answer.
+                    _state.update { it.copy(pendingAnswer = transcript) }
+                    submitAnswer()
+                } else if (!s.running) {
+                    // Idle. Set the instruction and start (or resume) the agent.
+                    _state.update { it.copy(instruction = transcript) }
+                    runAgent()
+                } else {
+                    // Running but no open question. Just log the user's input so they can
+                    // see it was received; the agent will pick it up on the next ask_user.
+                    appendLog(LogEntry.System("Голос (агент занят): $transcript"))
+                }
+            }
+        }
         // Restore the joystick overlay if the user had it enabled in a previous session.
         if (settings.joystickEnabled) {
             com.aiagent.android.overlay.JoystickOverlayService.show(getApplication())
@@ -91,6 +112,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         super.onCleared()
         OverlayService.stopListener = null
+        OverlayService.startListener = null
     }
 
     fun refreshServiceStatus() {
@@ -340,6 +362,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 hasConversation = true,
             )
         }
+        OverlayService.agentRunning = true
         appendLog(
             LogEntry.System(
                 if (isResume) "Продолжаю: $instruction"
@@ -369,6 +392,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(running = false, pendingQuestion = null) }
                 pendingAnswerChannel?.close()
                 pendingAnswerChannel = null
+                OverlayService.agentRunning = false
                 OverlayService.hideStop(getApplication())
                 appendLog(LogEntry.System("Агент остановлен. История сохранена — нажми «Продолжить» для нового сообщения."))
             }
@@ -383,6 +407,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         pendingProjectionChannel?.close()
         pendingProjectionChannel = null
         _state.update { it.copy(running = false, pendingQuestion = null, pendingProjection = false) }
+        OverlayService.agentRunning = false
         OverlayService.hideStop(getApplication())
         appendLog(LogEntry.System("Прервано пользователем."))
     }
