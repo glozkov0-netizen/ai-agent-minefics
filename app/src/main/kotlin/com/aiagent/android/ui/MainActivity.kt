@@ -215,6 +215,7 @@ fun AppRoot(
                     onVoiceInstruction = viewModel::toggleVoiceInstructionInput,
                     onJoystickEnabled = viewModel::updateJoystickEnabled,
                     onJoystickDispatch = viewModel::updateJoystickDispatch,
+                    onSettingsOverlay = viewModel::updateSettingsOverlay,
                     onAllowProjection = onRequestProjection,
                     onOpenAccessibility = {
                         context.startActivity(
@@ -280,6 +281,7 @@ fun AgentTab(
     onVoiceInstruction: () -> Unit,
     onJoystickEnabled: (Boolean) -> Unit,
     onJoystickDispatch: (Boolean) -> Unit,
+    onSettingsOverlay: (Boolean) -> Unit,
     onAllowProjection: () -> Unit,
     onOpenAccessibility: () -> Unit,
 ) {
@@ -424,6 +426,36 @@ fun AgentTab(
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
+                }
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = if (state.settingsOverlayEnabled) Color(0xFFB3E5FC) else Color(0xFFEEEEEE),
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "⚙️  Настройки в плавающем окне",
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(
+                        checked = state.settingsOverlayEnabled,
+                        onCheckedChange = onSettingsOverlay,
+                    )
+                }
+                if (state.settingsOverlayEnabled) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Поверх любого приложения появится ⚙️ кнопка. Тапни — раскроется панель с " +
+                            "переключателями: джойстик, двухмодельный режим, авто-скриншот и т.д. " +
+                            "Двигай кнопку перетаскиванием.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
         }

@@ -53,6 +53,8 @@ class OverlayService : Service() {
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var stopRoot: View? = null
+    private var settingsRoot: LinearLayout? = null
+    private var settingsExpanded = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -67,6 +69,8 @@ class OverlayService : Service() {
             ACTION_HIDE -> hideAll()
             ACTION_SHOW_STOP -> showStopButton()
             ACTION_HIDE_STOP -> hideStopButton()
+            ACTION_SHOW_SETTINGS -> showSettingsButton()
+            ACTION_HIDE_SETTINGS -> hideSettingsButton()
         }
         return START_NOT_STICKY
     }
@@ -375,6 +379,169 @@ class OverlayService : Service() {
         stopButtonBounds = null
     }
 
+    @SuppressLint("ClickableViewAccessibility", "SetTextI18n")
+    private fun showSettingsButton() {
+        if (settingsRoot != null) return
+        val ctx: Context = this
+        windowManager = windowManager ?: getSystemService(Context.WINDOW_SERVICE) as WindowManager
+
+        val container = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                cornerRadius = dp(16).toFloat()
+                setColor(Color.parseColor("#EE263238"))
+                setStroke(dp(2), Color.WHITE)
+            }
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+        }
+
+        val toggleBtn = Button(ctx).apply {
+            text = "⚙️"
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(20).toFloat()
+                setColor(Color.parseColor("#5C6BC0"))
+                setStroke(dp(2), Color.WHITE)
+            }
+            setPadding(dp(14), dp(6), dp(14), dp(6))
+        }
+        val panel = LinearLayout(ctx).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(0, dp(8), 0, 0)
+        }
+        rebuildSettingsPanel(panel)
+
+        toggleBtn.setOnClickListener {
+            settingsExpanded = !settingsExpanded
+            panel.visibility = if (settingsExpanded) View.VISIBLE else View.GONE
+            if (settingsExpanded) rebuildSettingsPanel(panel)
+        }
+        container.addView(toggleBtn)
+        container.addView(panel)
+
+        val type = if (Build.VERSION.SDK_INT >= 26) {
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        } else {
+            @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
+        }
+        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+        val params = WindowManager.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            type,
+            flags,
+            PixelFormat.TRANSLUCENT,
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            x = dp(12)
+            y = dp(80)
+        }
+
+        // Drag the whole settings widget by long-press on the ⚙️ button.
+        var startX = 0
+        var startY = 0
+        var rawX = 0f
+        var rawY = 0f
+        var dragged = false
+        toggleBtn.setOnTouchListener { _, ev ->
+            val lp = container.layoutParams as? WindowManager.LayoutParams ?: return@setOnTouchListener false
+            when (ev.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    startX = lp.x; startY = lp.y; rawX = ev.rawX; rawY = ev.rawY; dragged = false
+                    false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = (ev.rawX - rawX).toInt()
+                    val dy = (ev.rawY - rawY).toInt()
+                    if (kotlin.math.abs(dx) > dp(8) || kotlin.math.abs(dy) > dp(8)) {
+                        dragged = true
+                        lp.x = (startX + dx).coerceAtLeast(0)
+                        lp.y = (startY + dy).coerceAtLeast(0)
+                        runCatching { windowManager?.updateViewLayout(container, lp) }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> if (dragged) true else false
+                else -> false
+            }
+        }
+
+        runCatching { windowManager?.addView(container, params) }
+        settingsRoot = container
+    }
+
+    private fun rebuildSettingsPanel(panel: LinearLayout) {
+        panel.removeAllViews()
+        val s = Settings(this)
+        addSettingsToggle(panel, "🕹️ Джойстик", s.joystickEnabled) { value ->
+            s.joystickEnabled = value
+            if (value) JoystickOverlayService.show(applicationContext)
+            else JoystickOverlayService.hide(applicationContext)
+        }
+        addSettingsToggle(panel, "👁️ Двухмодельный режим", s.useVisionDescriber) { value ->
+            s.useVisionDescriber = value
+        }
+        addSettingsToggle(panel, "📸 Авто-скриншот", s.autoScreenshotEachTurn) { value ->
+            s.autoScreenshotEachTurn = value
+        }
+        addSettingsToggle(panel, "⏸️ Пауза по «done»", s.autoPauseOnIdle) { value ->
+            s.autoPauseOnIdle = value
+        }
+        addSettingsToggle(panel, "🎮 Передавать жест в игру", s.joystickDispatch) { value ->
+            s.joystickDispatch = value
+        }
+    }
+
+    private fun addSettingsToggle(
+        parent: LinearLayout,
+        label: String,
+        initial: Boolean,
+        onChange: (Boolean) -> Unit,
+    ) {
+        val ctx: Context = this
+        var current = initial
+        val btn = Button(ctx).apply {
+            text = renderToggle(label, current)
+            setTextColor(Color.WHITE)
+            isAllCaps = false
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            background = GradientDrawable().apply {
+                cornerRadius = dp(10).toFloat()
+                setColor(if (current) Color.parseColor("#388E3C") else Color.parseColor("#616161"))
+            }
+            setPadding(dp(10), dp(6), dp(10), dp(6))
+            val lp = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+            lp.topMargin = dp(4)
+            layoutParams = lp
+        }
+        btn.setOnClickListener {
+            current = !current
+            onChange(current)
+            btn.text = renderToggle(label, current)
+            (btn.background as? GradientDrawable)?.setColor(
+                if (current) Color.parseColor("#388E3C") else Color.parseColor("#616161"),
+            )
+        }
+        parent.addView(btn)
+    }
+
+    private fun renderToggle(label: String, value: Boolean): String =
+        if (value) "$label  ✓" else "$label  —"
+
+    private fun hideSettingsButton() {
+        val v = settingsRoot
+        if (v != null) runCatching { windowManager?.removeView(v) }
+        settingsRoot = null
+        settingsExpanded = false
+    }
+
     private fun hideAll() {
         cancelVoiceAnswer()
         val view = rootView
@@ -393,6 +560,7 @@ class OverlayService : Service() {
         super.onDestroy()
         hideAll()
         hideStopButton()
+        hideSettingsButton()
     }
 
     private fun deliver(value: String) {
@@ -421,6 +589,8 @@ class OverlayService : Service() {
         const val ACTION_HIDE = "com.aiagent.android.OVERLAY_HIDE"
         const val ACTION_SHOW_STOP = "com.aiagent.android.OVERLAY_SHOW_STOP"
         const val ACTION_HIDE_STOP = "com.aiagent.android.OVERLAY_HIDE_STOP"
+        const val ACTION_SHOW_SETTINGS = "com.aiagent.android.OVERLAY_SHOW_SETTINGS"
+        const val ACTION_HIDE_SETTINGS = "com.aiagent.android.OVERLAY_HIDE_SETTINGS"
         const val EXTRA_TEXT = "text"
         const val EXTRA_OPTIONS = "options"
 
@@ -464,6 +634,17 @@ class OverlayService : Service() {
 
         fun hideStop(context: Context) {
             val intent = Intent(context, OverlayService::class.java).apply { action = ACTION_HIDE_STOP }
+            context.startService(intent)
+        }
+
+        /** Show the persistent floating ⚙️ Settings button + expandable panel on top of every app. */
+        fun showSettings(context: Context) {
+            val intent = Intent(context, OverlayService::class.java).apply { action = ACTION_SHOW_SETTINGS }
+            context.startService(intent)
+        }
+
+        fun hideSettings(context: Context) {
+            val intent = Intent(context, OverlayService::class.java).apply { action = ACTION_HIDE_SETTINGS }
             context.startService(intent)
         }
 

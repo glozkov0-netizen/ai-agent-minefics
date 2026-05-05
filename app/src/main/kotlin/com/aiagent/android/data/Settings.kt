@@ -197,6 +197,15 @@ class Settings(context: Context) {
         get() = prefs.getBoolean(KEY_JOYSTICK_DISPATCH, DEFAULT_JOYSTICK_DISPATCH)
         set(value) = prefs.edit { putBoolean(KEY_JOYSTICK_DISPATCH, value) }
 
+    /**
+     * When true, a persistent ⚙️ floating button is shown on top of all apps. Tapping it
+     * expands a small panel with toggles for joystick / two-model mode / auto-screenshot etc.
+     * Lets the user adjust settings without leaving the game.
+     */
+    var settingsOverlayEnabled: Boolean
+        get() = prefs.getBoolean(KEY_SETTINGS_OVERLAY, DEFAULT_SETTINGS_OVERLAY)
+        set(value) = prefs.edit { putBoolean(KEY_SETTINGS_OVERLAY, value) }
+
     companion object {
         const val PREFS_NAME = "agent_prefs"
         const val DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
@@ -234,6 +243,7 @@ class Settings(context: Context) {
         const val DEFAULT_JOYSTICK_Y = 900
         const val DEFAULT_JOYSTICK_RADIUS = 180
         const val DEFAULT_JOYSTICK_DISPATCH = true
+        const val DEFAULT_SETTINGS_OVERLAY = false
 
         private const val KEY_API = "api_key"
         private const val KEY_BASE_URL = "base_url"
@@ -265,5 +275,6 @@ class Settings(context: Context) {
         private const val KEY_JOYSTICK_Y = "joystick_y"
         private const val KEY_JOYSTICK_RADIUS = "joystick_radius"
         private const val KEY_JOYSTICK_DISPATCH = "joystick_dispatch"
+        private const val KEY_SETTINGS_OVERLAY = "settings_overlay"
     }
 }

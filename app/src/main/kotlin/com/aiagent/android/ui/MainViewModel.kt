@@ -60,6 +60,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             visionDescriberModel = settings.visionDescriberModel,
             joystickEnabled = settings.joystickEnabled,
             joystickDispatch = settings.joystickDispatch,
+            settingsOverlayEnabled = settings.settingsOverlayEnabled,
         ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -81,6 +82,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         // Restore the joystick overlay if the user had it enabled in a previous session.
         if (settings.joystickEnabled) {
             com.aiagent.android.overlay.JoystickOverlayService.show(getApplication())
+        }
+        if (settings.settingsOverlayEnabled) {
+            OverlayService.showSettings(getApplication())
         }
     }
 
@@ -219,6 +223,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun updateJoystickDispatch(value: Boolean) {
         settings.joystickDispatch = value
         _state.update { it.copy(joystickDispatch = value) }
+    }
+
+    fun updateSettingsOverlay(value: Boolean) {
+        settings.settingsOverlayEnabled = value
+        _state.update { it.copy(settingsOverlayEnabled = value) }
+        val ctx = getApplication<Application>()
+        if (value) {
+            OverlayService.showSettings(ctx)
+        } else {
+            OverlayService.hideSettings(ctx)
+        }
     }
 
     fun updateScreenshotMaxDim(value: Int) {
@@ -602,6 +617,7 @@ data class UiState(
     val visionDescriberModel: String = "meta-llama/llama-4-scout-17b-16e-instruct",
     val joystickEnabled: Boolean = false,
     val joystickDispatch: Boolean = true,
+    val settingsOverlayEnabled: Boolean = false,
 
     // Runtime permission status.
     val overlayGranted: Boolean = false,
