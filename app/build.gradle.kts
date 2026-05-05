@@ -12,8 +12,21 @@ android {
         applicationId = "com.aiagent.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
+    }
+
+    // Use a stable debug keystore checked into the repo so every CI / dev / Devin build
+    // signs with the same certificate. Otherwise users hit "не удалось обработать пакет" /
+    // "App not installed" because Android refuses to upgrade an APK whose signature differs
+    // from the one already on the device.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
     }
 
     buildTypes {
@@ -23,6 +36,7 @@ android {
         }
         debug {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
