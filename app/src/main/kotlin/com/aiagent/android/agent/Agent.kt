@@ -165,12 +165,13 @@ class Agent(
                 val effort = settings.reasoningEffort.takeIf {
                     it.isNotBlank() && supportsReasoningEffort(settings.model)
                 }
-                // Drop all but the most recent N screenshots from the history before sending.
-                // Vision-capable models on Groq cap inputs at 5 images per request; without this
-                // we'd hit HTTP 400 'Too many images provided' after a handful of read_screen
-                // calls. Older image messages are replaced by a short text marker so the
-                // assistant still sees that something happened, just without the pixels.
-                trimOldScreenshots(messages, keep = MAX_IMAGES_IN_HISTORY)
+                // In two-model mode the controller is text-only by design. We strip ALL images
+                // from history (replacing each with its text part / a short marker) so the
+                // controller never receives multimodal content and the provider doesn't
+                // return HTTP 400 'content must be a string'. In single-model mode we keep
+                // only the last N images to stay under Groq's 5-images-per-request cap.
+                val keepImages = if (settings.useVisionDescriber) 0 else MAX_IMAGES_IN_HISTORY
+                trimOldScreenshots(messages, keep = keepImages)
                 val baseRequest = ChatRequest(
                     model = settings.model,
                     messages = messages,
@@ -284,16 +285,29 @@ class Agent(
                             name = call.function.name,
                         ),
                     )
-                    // When vision-mode is on AND the tool produced a screenshot, attach it as a
-                    // user message so the model actually "sees" the screen. Vision-capable
-                    // models (Llama-4 Scout/Maverick on Groq, GPT-4o on OpenAI) accept this format.
-                    if (visionEnabled() && result.imageDataUrl != null) {
-                        messages.add(
-                            userImageMessage(
-                                text = "Текущий скриншот (после инструмента ${call.function.name}):",
-                                imageDataUrl = result.imageDataUrl,
-                            ),
-                        )
+                    // Tool produced a screenshot → expose it to the controller. Two paths:
+                    //  - two-model mode: run the describer over the image and inject its text
+                    //    output. The controller is text-only by design.
+                    //  - single-model + vision-capable controller: attach raw image.
+                    if (result.imageDataUrl != null) {
+                        if (settings.useVisionDescriber && settings.visionDescriberModel.isNotBlank()) {
+                            val description = describeDataUrlWithVisionModel(client, result.imageDataUrl)
+                            if (!description.isNullOrBlank()) {
+                                messages.add(
+                                    textMessage(
+                                        role = "user",
+                                        text = "Описание скриншота от модели-наблюдателя (после ${call.function.name}):\n$description",
+                                    ),
+                                )
+                            }
+                        } else if (visionEnabled()) {
+                            messages.add(
+                                userImageMessage(
+                                    text = "Текущий скриншот (после инструмента ${call.function.name}):",
+                                    imageDataUrl = result.imageDataUrl,
+                                ),
+                            )
+                        }
                     }
                     if (result.done != null) {
                         onLog(AgentLog.Done(result.done.summary, result.done.success))
@@ -351,10 +365,11 @@ class Agent(
         return when (call.function.name) {
             "read_screen" -> {
                 val state = service.captureScreenState()
-                // Try to also grab a bitmap so a vision model can SEE the screen — Accessibility
-                // alone misses everything that's drawn into a SurfaceView (most games, video
-                // players, and OpenGL apps).
-                val bitmap = if (visionEnabled()) throttleAndCapture(service) else null
+                // Grab a bitmap so a vision-capable model — or the two-model describer — can SEE
+                // the screen. Accessibility alone misses everything drawn into a SurfaceView
+                // (games / video / WebGL).
+                val needsBitmap = visionEnabled() || settings.useVisionDescriber
+                val bitmap = if (needsBitmap) throttleAndCapture(service) else null
                 val hint = if (state.nodes.isEmpty()) {
                     "\n[hint] Accessibility tree пуст — приложение скорее всего рендерит в SurfaceView " +
                         "(игра / видео / WebGL). Вызови read_screen_text для OCR или " +
@@ -380,7 +395,7 @@ class Agent(
                     ToolResult(
                         toolContent = "Foreground app: ${service.captureScreenState().packageName}\n--- OCR ---\n$text",
                         summary = "OCR: ${text.length} символов",
-                        imageDataUrl = if (visionEnabled()) bitmapToDataUrl(bitmap) else null,
+                        imageDataUrl = if (visionEnabled() || settings.useVisionDescriber) bitmapToDataUrl(bitmap) else null,
                     )
                 }
             }
@@ -393,7 +408,7 @@ class Agent(
                     ToolResult(
                         toolContent = "Saved screenshot to $path",
                         summary = "сохранён скриншот: $path",
-                        imageDataUrl = if (visionEnabled()) bitmapToDataUrl(bitmap) else null,
+                        imageDataUrl = if (visionEnabled() || settings.useVisionDescriber) bitmapToDataUrl(bitmap) else null,
                     )
                 }
             }
@@ -921,18 +936,30 @@ class Agent(
     private suspend fun describeScreenshotWithVisionModel(
         controller: LlmClient,
         bitmap: Bitmap,
+    ): String? = describeDataUrlWithVisionModel(controller, bitmapToDataUrl(bitmap))
+
+    private suspend fun describeDataUrlWithVisionModel(
+        controller: LlmClient,
+        dataUrl: String,
     ): String? {
-        val dataUrl = bitmapToDataUrl(bitmap)
         val req = ChatRequest(
             model = settings.visionDescriberModel,
             messages = listOf(
                 textMessage(
                     role = "system",
-                    text = "Ты — модель-наблюдатель. Тебе показывают скриншот экрана Android-устройства. " +
-                        "Опиши кратко (3–6 предложений), что на нём видно: какое приложение, " +
-                        "ключевые элементы UI (кнопки, поля, тексты), что происходит сейчас, " +
-                        "есть ли модальные окна / диалоги. Пиши простыми фразами на русском, " +
-                        "без вступлений и без 'я вижу...' — сразу описание.",
+                    text = "Ты — модель-наблюдатель для агента-помощника в играх. Тебе показывают " +
+                        "скриншот экрана Android-устройства. Опиши его подробно (5-10 предложений) " +
+                        "так, чтобы текстовая модель-контроллер могла принять решение БЕЗ доступа к " +
+                        "пикселям:\n" +
+                        "- какое приложение / игра / экран сейчас открыт;\n" +
+                        "- ключевые UI-элементы (кнопки, поля, тексты, иконки) — где они расположены, " +
+                        "как выглядят, какого цвета, на что похожи (если иконка — на что она похожа);\n" +
+                        "- состояние игры если это игра: HP/мана/таймер/счёт, какие враги/предметы " +
+                        "видны, в каком углу что лежит, цветные индикаторы;\n" +
+                        "- модальные окна / диалоги / уведомления — что там написано;\n" +
+                        "- что вообще происходит на экране СЕЙЧАС.\n" +
+                        "Пиши сразу описание, простыми фразами на русском, без вступлений типа " +
+                        "'я вижу' или 'на скриншоте'.",
                 ),
                 userImageMessage(
                     text = "Опиши, что на этом скриншоте.",
@@ -943,7 +970,7 @@ class Agent(
             tools = null,
             toolChoice = null,
             temperature = 0.2,
-            maxCompletionTokens = 400,
+            maxCompletionTokens = 700,
             reasoningEffort = null,
         )
         return try {
