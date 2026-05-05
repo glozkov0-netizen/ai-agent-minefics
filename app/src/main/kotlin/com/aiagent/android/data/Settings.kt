@@ -20,6 +20,17 @@ class Settings(context: Context) {
                 putBoolean(KEY_MIGRATED_MAX_STEPS_V3, true)
             }
         }
+        // One-shot migration: previous builds defaulted reasoning_effort to "low" and
+        // unconditionally sent it on every chat call. Most non-OpenAI models reject this
+        // with HTTP 400, so we now ship with "" by default. Existing installs are migrated
+        // exactly once: any "low" value (the previous default) is cleared.
+        if (!prefs.getBoolean(KEY_MIGRATED_REASONING_V3, false)) {
+            val current = prefs.getString(KEY_REASONING_EFFORT, "") ?: ""
+            prefs.edit {
+                if (current == "low") putString(KEY_REASONING_EFFORT, "")
+                putBoolean(KEY_MIGRATED_REASONING_V3, true)
+            }
+        }
     }
 
     var apiKey: String
@@ -146,6 +157,7 @@ class Settings(context: Context) {
         private const val KEY_MODEL = "model"
         private const val KEY_MAX_STEPS = "max_steps"
         private const val KEY_MIGRATED_MAX_STEPS_V3 = "migrated_max_steps_v3"
+        private const val KEY_MIGRATED_REASONING_V3 = "migrated_reasoning_v3"
         private const val KEY_TEMPERATURE = "temperature"
         private const val KEY_MAX_TOKENS = "max_tokens"
         private const val KEY_REASONING_EFFORT = "reasoning_effort"

@@ -110,6 +110,14 @@ class Agent(
         try {
             for (step in 1..settings.maxSteps) {
                 onLog(AgentLog.Thinking(step))
+                // Only send reasoning_effort to models that actually accept it. Per the Groq
+                // docs (https://console.groq.com/docs/reasoning) the supported set is:
+                //   openai/gpt-oss-20b, openai/gpt-oss-120b, openai/gpt-oss-safeguard-20b,
+                //   qwen/qwen3-32b — plus OpenAI's own o1 / o3 / o4 series. Sending it to any
+                // other model (e.g. llama-3.x, llama-4-scout) yields HTTP 400.
+                val effort = settings.reasoningEffort.takeIf {
+                    it.isNotBlank() && supportsReasoningEffort(settings.model)
+                }
                 val baseRequest = ChatRequest(
                     model = settings.model,
                     messages = messages,
@@ -117,7 +125,7 @@ class Agent(
                     toolChoice = "auto",
                     temperature = settings.temperature.toDouble(),
                     maxCompletionTokens = settings.maxTokens.takeIf { it > 0 },
-                    reasoningEffort = settings.reasoningEffort.takeIf { it.isNotBlank() },
+                    reasoningEffort = effort,
                 )
                 val response = try {
                     client.chat(baseRequest)
@@ -687,6 +695,21 @@ class Agent(
         val file = File(dir, name)
         FileOutputStream(file).use { out -> bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
         return file.absolutePath
+    }
+
+    /**
+     * True if the given model id is known to accept the `reasoning_effort` parameter.
+     *
+     * Sources: https://console.groq.com/docs/reasoning (Groq supports it on gpt-oss-* and
+     * qwen3-32b) and the OpenAI reasoning models (o1 / o3 / o4 / gpt-5 with reasoning).
+     */
+    private fun supportsReasoningEffort(modelId: String): Boolean {
+        val id = modelId.lowercase()
+        return id.contains("gpt-oss") ||
+            id.contains("qwen3") ||
+            id.startsWith("o1") || id.contains("/o1") ||
+            id.startsWith("o3") || id.contains("/o3") ||
+            id.startsWith("o4") || id.contains("/o4")
     }
 
     /** True if the given screen-pixel point falls inside the persistent overlay STOP button.
