@@ -227,6 +227,8 @@ fun AppRoot(
                     onScreenshotMaxDim = viewModel::updateScreenshotMaxDim,
                     onAutoScreenshot = viewModel::updateAutoScreenshot,
                     onAutoPauseOnIdle = viewModel::updateAutoPauseOnIdle,
+                    onUseVisionDescriber = viewModel::updateUseVisionDescriber,
+                    onVisionDescriberModel = viewModel::updateVisionDescriberModel,
                     onModel = viewModel::updateModel,
                     onMaxSteps = viewModel::updateMaxSteps,
                     onTemperature = viewModel::updateTemperature,
@@ -491,6 +493,8 @@ fun SettingsTab(
     onScreenshotMaxDim: (Int) -> Unit,
     onAutoScreenshot: (Boolean) -> Unit,
     onAutoPauseOnIdle: (Boolean) -> Unit,
+    onUseVisionDescriber: (Boolean) -> Unit,
+    onVisionDescriberModel: (String) -> Unit,
     onFetchModels: () -> Unit,
 ) {
     val scrollState = rememberScrollState()
@@ -761,6 +765,46 @@ fun SettingsTab(
                 "пока ты не нажмёшь красную кнопку «СТОП» в overlay.",
             style = MaterialTheme.typography.bodySmall,
         )
+
+        Spacer(Modifier.height(8.dp))
+        Text("Двухмодельный режим (глаза + мозг)", style = MaterialTheme.typography.titleMedium)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Switch(
+                checked = state.useVisionDescriber,
+                onCheckedChange = onUseVisionDescriber,
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(
+                if (state.useVisionDescriber) "ВКЛ: vision-модель описывает экран, главная управляет"
+                else "ВЫКЛ: одна модель и видит, и управляет",
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Text(
+            "Когда ВКЛ: перед каждым шагом скрин уходит в модель-наблюдателя — она пишет " +
+                "текстовое описание экрана. Главная модель (поле «Модель» сверху) получает " +
+                "это описание + дерево спецвозможностей и решает что делать. Так можно " +
+                "поставить мощную текстовую gpt-oss-120b как «мозг», а llama-4-scout — " +
+                "как «глаза».",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        if (state.useVisionDescriber) {
+            OutlinedTextField(
+                value = state.visionDescriberModel,
+                onValueChange = onVisionDescriberModel,
+                label = { Text("Модель-наблюдатель (vision)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            Text(
+                "Должна поддерживать картинки. На Groq это, например, " +
+                    "meta-llama/llama-4-scout-17b-16e-instruct.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
 
         Text(
             "Поддерживается любой OpenAI-совместимый chat completions API с tool calling. Примеры: " +

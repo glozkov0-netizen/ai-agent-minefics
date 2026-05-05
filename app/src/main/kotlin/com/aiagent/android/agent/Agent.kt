@@ -124,20 +124,37 @@ class Agent(
         try {
             for (step in 1..settings.maxSteps) {
                 onLog(AgentLog.Thinking(step))
-                // Game-mode: capture a fresh screenshot before each model call and inject it as a
-                // user message. This way the model never has to "remember" to call read_screen
-                // before answering — it always has the current frame in front of it. Skipped when
-                // the user disables this in Settings, or the model doesn't support vision.
-                if (settings.autoScreenshotEachTurn && visionEnabled()) {
+                // Game-mode: get a fresh view of the screen before each model call.
+                // Two paths:
+                //  (a) Single-model: inject the raw image straight into the controller's
+                //      history. Requires a vision-capable controller model.
+                //  (b) Two-model (vision describer): ask a separate vision model to write a
+                //      textual description of the screenshot and inject the *text* — not the
+                //      image — into the controller's history. Lets a powerful but text-only
+                //      controller (e.g. gpt-oss-120b) drive the agent while a smaller vision
+                //      model handles pixel parsing.
+                if (settings.autoScreenshotEachTurn) {
                     val frame = throttleAndCapture(service)
-                    val dataUrl = frame?.let { bitmapToDataUrl(it) }
-                    if (dataUrl != null) {
-                        messages.add(
-                            userImageMessage(
-                                text = "Текущий кадр экрана (шаг $step):",
-                                imageDataUrl = dataUrl,
-                            ),
-                        )
+                    if (frame != null) {
+                        if (settings.useVisionDescriber && settings.visionDescriberModel.isNotBlank()) {
+                            val description = describeScreenshotWithVisionModel(client, frame)
+                            if (!description.isNullOrBlank()) {
+                                messages.add(
+                                    textMessage(
+                                        role = "user",
+                                        text = "Описание экрана от модели-наблюдателя (шаг $step):\n$description",
+                                    ),
+                                )
+                            }
+                        } else if (visionEnabled()) {
+                            val dataUrl = bitmapToDataUrl(frame)
+                            messages.add(
+                                userImageMessage(
+                                    text = "Текущий кадр экрана (шаг $step):",
+                                    imageDataUrl = dataUrl,
+                                ),
+                            )
+                        }
                     }
                 }
                 // Only send reasoning_effort to models that actually accept it. Per the Groq
@@ -520,11 +537,24 @@ class Agent(
                 )
             }
             "speak" -> {
-                val text = args.stringOf("text") ?: return ToolResult.error("Missing text")
+                val rawText = args.stringOf("text") ?: return ToolResult.error("Missing text")
+                // Cap TTS payload. The user complains about speak() reading whole-screen
+                // descriptions like a wall of text. Force the model toward short remarks: hard
+                // truncate to MAX_SPEAK_CHARS, strip newlines, log a hint back so the model
+                // learns next time.
+                val sanitized = rawText.replace(Regex("\\s+"), " ").trim()
+                val text = if (sanitized.length > MAX_SPEAK_CHARS) {
+                    sanitized.take(MAX_SPEAK_CHARS - 1).trimEnd { it == ',' || it == '.' || it.isWhitespace() } + "…"
+                } else {
+                    sanitized
+                }
                 val rate = args.floatOf("rate") ?: settings.ttsRate
                 val ok = tts.speak(text, rate)
+                val truncatedHint = if (sanitized.length > MAX_SPEAK_CHARS)
+                    " (исходник был ${sanitized.length} симв., обрезан до $MAX_SPEAK_CHARS — в следующий раз говори короче, одно предложение)"
+                else ""
                 ToolResult(
-                    toolContent = if (ok) "Spoke ${text.length} chars" else "TTS failed",
+                    toolContent = if (ok) "Spoke ${text.length} chars$truncatedHint" else "TTS failed",
                     summary = if (ok) "озвучено: «${text.take(40)}»" else "не удалось озвучить",
                 )
             }
@@ -882,6 +912,52 @@ class Agent(
      * is at most [Settings.screenshotMaxDim] pixels. JPEG is used for ~10× smaller payload than
      * PNG at quality 80, which dramatically reduces upload size and token usage.
      */
+    /**
+     * Two-model mode: ask the configured vision describer to write a textual summary of the
+     * given screenshot. The result is plain Russian prose suitable to drop into the controller
+     * model's history. Returns null if the call fails — the agent keeps going without the
+     * description so a transient describer error doesn't kill the whole step.
+     */
+    private suspend fun describeScreenshotWithVisionModel(
+        controller: LlmClient,
+        bitmap: Bitmap,
+    ): String? {
+        val dataUrl = bitmapToDataUrl(bitmap)
+        val req = ChatRequest(
+            model = settings.visionDescriberModel,
+            messages = listOf(
+                textMessage(
+                    role = "system",
+                    text = "Ты — модель-наблюдатель. Тебе показывают скриншот экрана Android-устройства. " +
+                        "Опиши кратко (3–6 предложений), что на нём видно: какое приложение, " +
+                        "ключевые элементы UI (кнопки, поля, тексты), что происходит сейчас, " +
+                        "есть ли модальные окна / диалоги. Пиши простыми фразами на русском, " +
+                        "без вступлений и без 'я вижу...' — сразу описание.",
+                ),
+                userImageMessage(
+                    text = "Опиши, что на этом скриншоте.",
+                    imageDataUrl = dataUrl,
+                ),
+            ),
+            // No tools — the describer just writes prose.
+            tools = null,
+            toolChoice = null,
+            temperature = 0.2,
+            maxCompletionTokens = 400,
+            reasoningEffort = null,
+        )
+        return try {
+            val resp = controller.chat(req)
+            resp.choices.firstOrNull()?.message?.contentText?.trim()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "Vision describer failed: ${e.message}")
+            onLog(AgentLog.Error("Модель-наблюдатель не ответила: ${e.message ?: e::class.java.simpleName}. Шаг продолжается без описания."))
+            null
+        }
+    }
+
     private fun bitmapToDataUrl(bitmap: Bitmap): String {
         val maxDim = settings.screenshotMaxDim.coerceAtLeast(256)
         val scale = (maxDim.toFloat() / maxOf(bitmap.width, bitmap.height)).coerceAtMost(1f)
@@ -943,6 +1019,10 @@ class Agent(
         /** Vision-capable models on Groq cap inputs at 5 images/request; 3 keeps headroom for
          *  the model's own returned tool messages without hitting the limit. */
         private const val MAX_IMAGES_IN_HISTORY = 3
+        /** Hard cap on text passed to the TTS engine. The model frequently tries to read full
+         *  multi-paragraph screen descriptions; we silently truncate to keep TTS short and
+         *  game-friendly. */
+        private const val MAX_SPEAK_CHARS = 220
         private const val SYSTEM_PROMPT = """You are an AI agent that lives on the user's Android phone and helps them — especially during gameplay. You can observe the screen, listen to audio, speak, write files, and control the UI through Accessibility.
 
 You have these tools:
@@ -959,7 +1039,7 @@ ACTUATION
 - wait(ms)                                    → pause for animations.
 
 VOICE / AUDIO
-- speak(text, rate?)              → say something out loud through the device speaker.
+- speak(text, rate?)              → say something out loud through the device speaker. **Keep it under ~200 chars (one short sentence).** Anything longer is silently truncated. NEVER read out a whole screen description — summarise in one phrase.
 - listen(language?)               → one-shot live mic listen via the platform recogniser.
 - record_audio(seconds, language?) → record N seconds of mic audio and transcribe via Whisper.
 

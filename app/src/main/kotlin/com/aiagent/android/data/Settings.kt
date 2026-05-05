@@ -149,6 +149,23 @@ class Settings(context: Context) {
         get() = prefs.getBoolean(KEY_AUTO_SCREENSHOT, DEFAULT_AUTO_SCREENSHOT)
         set(value) = prefs.edit { putBoolean(KEY_AUTO_SCREENSHOT, value) }
 
+    /**
+     * Two-model mode: the controller (`model`) is text-only, and a separate vision model
+     * (`visionDescriberModel`) is asked to describe each fresh screenshot. The controller then
+     * receives the textual description plus the accessibility tree and decides actions. Lets
+     * the user run a powerful but text-only model (e.g. gpt-oss-120b) as the brain while
+     * delegating pixel parsing to a vision-capable model.
+     */
+    var useVisionDescriber: Boolean
+        get() = prefs.getBoolean(KEY_USE_VISION_DESCRIBER, DEFAULT_USE_VISION_DESCRIBER)
+        set(value) = prefs.edit { putBoolean(KEY_USE_VISION_DESCRIBER, value) }
+
+    /** Model id used by the vision describer when [useVisionDescriber] is enabled. */
+    var visionDescriberModel: String
+        get() = prefs.getString(KEY_VISION_DESCRIBER_MODEL, DEFAULT_VISION_DESCRIBER_MODEL)
+            ?: DEFAULT_VISION_DESCRIBER_MODEL
+        set(value) = prefs.edit { putString(KEY_VISION_DESCRIBER_MODEL, value) }
+
     companion object {
         const val PREFS_NAME = "agent_prefs"
         const val DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
@@ -176,6 +193,10 @@ class Settings(context: Context) {
         // pattern of a normal chatbot.
         const val DEFAULT_AUTO_PAUSE = false
         const val DEFAULT_AUTO_SCREENSHOT = true
+        // Two-model mode is OFF by default; user opts in. When ON the default observer is
+        // Llama-4 Scout on Groq (free, fast, vision-capable, returns Russian-friendly prose).
+        const val DEFAULT_USE_VISION_DESCRIBER = false
+        const val DEFAULT_VISION_DESCRIBER_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
         private const val KEY_API = "api_key"
         private const val KEY_BASE_URL = "base_url"
@@ -200,5 +221,7 @@ class Settings(context: Context) {
         private const val KEY_SCREENSHOT_MAX_DIM = "screenshot_max_dim"
         private const val KEY_AUTO_PAUSE = "auto_pause_on_idle"
         private const val KEY_AUTO_SCREENSHOT = "auto_screenshot_each_turn"
+        private const val KEY_USE_VISION_DESCRIBER = "use_vision_describer"
+        private const val KEY_VISION_DESCRIBER_MODEL = "vision_describer_model"
     }
 }

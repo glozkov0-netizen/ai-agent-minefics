@@ -56,6 +56,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             screenshotMaxDim = settings.screenshotMaxDim,
             autoScreenshotEachTurn = settings.autoScreenshotEachTurn,
             autoPauseOnIdle = settings.autoPauseOnIdle,
+            useVisionDescriber = settings.useVisionDescriber,
+            visionDescriberModel = settings.visionDescriberModel,
         ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -185,6 +187,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun updateAutoPauseOnIdle(value: Boolean) {
         settings.autoPauseOnIdle = value
         _state.update { it.copy(autoPauseOnIdle = value) }
+    }
+
+    fun updateUseVisionDescriber(value: Boolean) {
+        settings.useVisionDescriber = value
+        _state.update { it.copy(useVisionDescriber = value) }
+    }
+
+    fun updateVisionDescriberModel(value: String) {
+        settings.visionDescriberModel = value
+        _state.update { it.copy(visionDescriberModel = value) }
     }
 
     fun updateScreenshotMaxDim(value: Int) {
@@ -528,6 +540,8 @@ data class UiState(
     val screenshotMaxDim: Int = 1024,
     val autoScreenshotEachTurn: Boolean = true,
     val autoPauseOnIdle: Boolean = false,
+    val useVisionDescriber: Boolean = false,
+    val visionDescriberModel: String = "meta-llama/llama-4-scout-17b-16e-instruct",
 
     // Runtime permission status.
     val overlayGranted: Boolean = false,
