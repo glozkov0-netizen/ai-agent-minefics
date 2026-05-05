@@ -90,9 +90,11 @@ class Agent(
      * losing previous context. When [conversation] is empty we seed it with system+user; when
      * it already has content we just append the new user instruction and continue.
      *
-     * The loop is "user-only-exit": it never returns voluntarily because the model said it was
-     * done. The only way out is a CancellationException (user pressed the overlay STOP button)
-     * or the [Settings.maxSteps] hard cap.
+     * The loop is "user-only-exit": the agent never auto-terminates the conversation. When the
+     * model calls `done` or stops producing tool calls we simply pause (return from this fun);
+     * the conversation stays in memory so the user can press «Продолжить» with a new instruction
+     * to resume, or tap the floating STOP overlay to truly terminate. The only ways out are a
+     * CancellationException (user pressed STOP) or the [Settings.maxSteps] hard cap.
      */
     suspend fun run(
         userInstruction: String,
@@ -118,10 +120,6 @@ class Agent(
         }
         val messages = conversation
         var lastScreenState: ScreenState? = null
-        // Counter for consecutive turns where the model produced no tool calls. We don't actually
-        // exit when this happens; instead we nudge the model and keep going. But to avoid spinning
-        // forever burning API credit we hard-cap idle iterations.
-        var idleStreak = 0
 
         try {
             for (step in 1..settings.maxSteps) {
@@ -204,35 +202,29 @@ class Agent(
                 messages.add(msg)
                 val toolCalls = msg.toolCalls.orEmpty()
                 if (toolCalls.isEmpty()) {
-                    // The model didn't call any tool. We do NOT exit here — the user explicitly
-                    // requested user-only-exit. Instead we nudge the model and loop.
-                    idleStreak++
-                    if (idleStreak >= 3) {
-                        onLog(
-                            AgentLog.Error(
-                                "Модель уже 3 раза подряд не вызывает инструменты. Пауза. " +
-                                    "Нажми «Продолжить», чтобы дать новое указание, или «Стоп» в overlay.",
-                            ),
-                        )
-                        return
-                    }
-                    messages.add(
-                        textMessage(
-                            role = "system",
-                            text = "Я не получил от тебя tool call. Ты НЕ можешь сам выйти — выходит только пользователь по кнопке СТОП. " +
-                                "Продолжай помогать игроку: вызови read_screen чтобы посмотреть, что сейчас происходит, " +
-                                "или speak / ask_user_overlay чтобы задать вопрос.",
+                    // The model produced a plain text reply with no tool call. We treat this as
+                    // "I'm done thinking for now" and pause: keep the conversation, exit the
+                    // step loop, hide the run flag in the viewmodel. The user can press
+                    // «Продолжить» with a new instruction (which appends to this same history)
+                    // or tap STOP in the overlay to truly end. This stops the agent from looping
+                    // through `read_screen → speak → "если нужно скажите"` forever.
+                    onLog(
+                        AgentLog.Error(
+                            "Жду новое указание. Нажми «Продолжить» чтобы продолжить, или «Стоп» в overlay.",
                         ),
                     )
-                    continue
+                    return
                 }
-                idleStreak = 0
                 for (call in toolCalls) {
                     // Each tool is wrapped in its own try/catch so a buggy tool argument or an
                     // exception inside the implementation cannot kill the loop. The error is
                     // returned to the model as a normal tool result so it can recover.
                     val result = try {
                         executeTool(service, call, lastScreenState)
+                    } catch (e: kotlinx.coroutines.CancellationException) {
+                        // Propagate cancellation up so the user-press-STOP flow ends cleanly
+                        // instead of the loop keeping going with a fake "exception" tool result.
+                        throw e
                     } catch (e: Throwable) {
                         Log.e(TAG, "Tool ${call.function.name} threw", e)
                         ToolResult.error("Исключение в инструменте ${call.function.name}: ${e.message ?: e::class.java.simpleName}")
@@ -259,22 +251,21 @@ class Agent(
                         )
                     }
                     if (result.done != null) {
-                        // The model thinks it's finished. We log it but DO NOT exit — only the
-                        // user can stop the agent by tapping the overlay STOP button. Push a
-                        // system reminder back so the model keeps helping in the next turn.
+                        // The model finished its sub-task. We pause the loop — the agent is NOT
+                        // killed (overlay STOP button is the only way to fully terminate, per
+                        // user-only-exit) but we don't keep spinning either. The conversation is
+                        // preserved; the user presses «Продолжить» with the next instruction to
+                        // resume, or taps STOP in the overlay to end.
                         onLog(AgentLog.Done(result.done.summary, result.done.success))
-                        messages.add(
-                            textMessage(
-                                role = "system",
-                                text = "User wants you to stay active until they press the overlay STOP button. " +
-                                    "Don't call `done` again unless something breaks. Wait for the next user " +
-                                    "message or proactively read_screen to see if anything changed.",
-                            ),
-                        )
+                        return
                     }
                 }
             }
             onLog(AgentLog.Error("Достигнут лимит шагов (${settings.maxSteps}) без завершения."))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // User pressed STOP. Propagate so the viewmodel sees the run as cancelled instead of
+            // failed; we don't log it as an error because that's the intended exit path.
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "Agent loop failed", e)
             onLog(AgentLog.Error(e.message ?: e.toString()))
@@ -968,9 +959,10 @@ Workflow rules:
 5. If the user asked you to read out chat or a system message that is rendered in a game / image, use `read_screen_text` to get the text first, then `speak` it.
 6. Keep `type_text` payloads under 1000 characters and avoid embedded newlines unless absolutely required.
 7. When file writes / deletions are destructive, confirm with `ask_user_overlay` first.
-8. When you finish a sub-task, call `done(summary)` to report it, then KEEP HELPING. The
-   user is still here. If there is nothing actionable, call `read_screen` to check on the game
-   periodically, or `ask_user_overlay` to ask what they want next.
+8. When you finish a sub-task and there is nothing else to do RIGHT NOW, call `done(summary)`. The
+   loop will pause and wait for the user's next instruction (the conversation is preserved).
+   Don't keep calling tools just to "stay busy" — that wastes the user's API credit and spams the
+   log. If you genuinely need information from the user, prefer `ask_user_overlay`.
 9. **NEVER claim you can see the screen unless you actually called `read_screen` (or `take_screenshot`/`read_screen_text`) in THIS turn.** When the user asks "что ты видишь" / "what do you see", call `read_screen` first and describe ONLY what's in the result; do not invent content.
 10. Reply in the user's language (default Russian) for user-facing strings (`speak`, `ask_user`, `ask_user_overlay`, `done.summary`).
 """
