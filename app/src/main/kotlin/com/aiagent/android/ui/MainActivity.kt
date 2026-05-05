@@ -225,6 +225,8 @@ fun AppRoot(
                     onBaseUrl = viewModel::updateBaseUrl,
                     onSendScreenshots = viewModel::updateSendScreenshots,
                     onScreenshotMaxDim = viewModel::updateScreenshotMaxDim,
+                    onAutoScreenshot = viewModel::updateAutoScreenshot,
+                    onAutoPauseOnIdle = viewModel::updateAutoPauseOnIdle,
                     onModel = viewModel::updateModel,
                     onMaxSteps = viewModel::updateMaxSteps,
                     onTemperature = viewModel::updateTemperature,
@@ -487,6 +489,8 @@ fun SettingsTab(
     onOverlayAlpha: (Float) -> Unit,
     onSendScreenshots: (Boolean) -> Unit,
     onScreenshotMaxDim: (Int) -> Unit,
+    onAutoScreenshot: (Boolean) -> Unit,
+    onAutoPauseOnIdle: (Boolean) -> Unit,
     onFetchModels: () -> Unit,
 ) {
     val scrollState = rememberScrollState()
@@ -715,6 +719,48 @@ fun SettingsTab(
                 modifier = Modifier.fillMaxWidth(),
             )
         }
+
+        Spacer(Modifier.height(8.dp))
+        Text("Поведение агента", style = MaterialTheme.typography.titleMedium)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Switch(
+                checked = state.autoScreenshotEachTurn,
+                onCheckedChange = onAutoScreenshot,
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(
+                "Скрин перед каждым шагом (агент всегда видит экран)",
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Text(
+            "Снимок добавляется в контекст модели автоматически в начале каждого шага. " +
+                "Работает только если выбрана vision-модель.",
+            style = MaterialTheme.typography.bodySmall,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Switch(
+                checked = state.autoPauseOnIdle,
+                onCheckedChange = onAutoPauseOnIdle,
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(
+                if (state.autoPauseOnIdle) "Пауза, когда модель отвечает 'готово'"
+                else "Не паузить — агент работает до нажатия СТОП",
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Text(
+            "Выкл = режим помощника в игре: агент не закроется сам, продолжает крутиться " +
+                "пока ты не нажмёшь красную кнопку «СТОП» в overlay.",
+            style = MaterialTheme.typography.bodySmall,
+        )
 
         Text(
             "Поддерживается любой OpenAI-совместимый chat completions API с tool calling. Примеры: " +

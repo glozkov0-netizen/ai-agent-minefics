@@ -124,6 +124,22 @@ class Agent(
         try {
             for (step in 1..settings.maxSteps) {
                 onLog(AgentLog.Thinking(step))
+                // Game-mode: capture a fresh screenshot before each model call and inject it as a
+                // user message. This way the model never has to "remember" to call read_screen
+                // before answering — it always has the current frame in front of it. Skipped when
+                // the user disables this in Settings, or the model doesn't support vision.
+                if (settings.autoScreenshotEachTurn && visionEnabled()) {
+                    val frame = throttleAndCapture(service)
+                    val dataUrl = frame?.let { bitmapToDataUrl(it) }
+                    if (dataUrl != null) {
+                        messages.add(
+                            userImageMessage(
+                                text = "Текущий кадр экрана (шаг $step):",
+                                imageDataUrl = dataUrl,
+                            ),
+                        )
+                    }
+                }
                 // Only send reasoning_effort to models that actually accept it. Per the Groq
                 // docs (https://console.groq.com/docs/reasoning) the supported set is:
                 //   openai/gpt-oss-20b, openai/gpt-oss-120b, openai/gpt-oss-safeguard-20b,
@@ -202,18 +218,30 @@ class Agent(
                 messages.add(msg)
                 val toolCalls = msg.toolCalls.orEmpty()
                 if (toolCalls.isEmpty()) {
-                    // The model produced a plain text reply with no tool call. We treat this as
-                    // "I'm done thinking for now" and pause: keep the conversation, exit the
-                    // step loop, hide the run flag in the viewmodel. The user can press
-                    // «Продолжить» with a new instruction (which appends to this same history)
-                    // or tap STOP in the overlay to truly end. This stops the agent from looping
-                    // through `read_screen → speak → "если нужно скажите"` forever.
-                    onLog(
-                        AgentLog.Error(
-                            "Жду новое указание. Нажми «Продолжить» чтобы продолжить, или «Стоп» в overlay.",
+                    // Two modes here:
+                    //  - autoPauseOnIdle = true  → return; user resumes with «Продолжить».
+                    //  - autoPauseOnIdle = false (game mode) → don't exit, nudge the model and
+                    //    keep going. Only the overlay STOP button can stop us.
+                    if (settings.autoPauseOnIdle) {
+                        onLog(
+                            AgentLog.Error(
+                                "Жду новое указание. Нажми «Продолжить» чтобы продолжить, или «Стоп» в overlay.",
+                            ),
+                        )
+                        return
+                    }
+                    messages.add(
+                        textMessage(
+                            role = "system",
+                            text = "Я не получил от тебя tool call. Продолжай помогать игроку: " +
+                                "посмотри на текущий скриншот выше и решай — нужно ли что-то " +
+                                "делать (read_screen / tap / swipe / speak / ask_user_overlay). " +
+                                "Если ничего полезного сделать нельзя прямо сейчас — просто молчи, " +
+                                "ответь одним словом 'жду'. НЕ повторяй одну и ту же фразу типа " +
+                                "«если нужно что-то конкретное, скажите» — это спам.",
                         ),
                     )
-                    return
+                    continue
                 }
                 for (call in toolCalls) {
                     // Each tool is wrapped in its own try/catch so a buggy tool argument or an
@@ -251,13 +279,21 @@ class Agent(
                         )
                     }
                     if (result.done != null) {
-                        // The model finished its sub-task. We pause the loop — the agent is NOT
-                        // killed (overlay STOP button is the only way to fully terminate, per
-                        // user-only-exit) but we don't keep spinning either. The conversation is
-                        // preserved; the user presses «Продолжить» with the next instruction to
-                        // resume, or taps STOP in the overlay to end.
                         onLog(AgentLog.Done(result.done.summary, result.done.success))
-                        return
+                        if (settings.autoPauseOnIdle) {
+                            // Pause and wait for the next user instruction.
+                            return
+                        }
+                        // Game mode: don't let the model exit; remind it to keep helping.
+                        messages.add(
+                            textMessage(
+                                role = "system",
+                                text = "User has set the agent to user-only-exit. You CANNOT stop. " +
+                                    "Don't call `done` again. Wait for the next user message " +
+                                    "or proactively read_screen / take_screenshot to see what " +
+                                    "the user is doing now and react.",
+                            ),
+                        )
                     }
                 }
             }
@@ -959,11 +995,14 @@ Workflow rules:
 5. If the user asked you to read out chat or a system message that is rendered in a game / image, use `read_screen_text` to get the text first, then `speak` it.
 6. Keep `type_text` payloads under 1000 characters and avoid embedded newlines unless absolutely required.
 7. When file writes / deletions are destructive, confirm with `ask_user_overlay` first.
-8. When you finish a sub-task and there is nothing else to do RIGHT NOW, call `done(summary)`. The
-   loop will pause and wait for the user's next instruction (the conversation is preserved).
-   Don't keep calling tools just to "stay busy" — that wastes the user's API credit and spams the
-   log. If you genuinely need information from the user, prefer `ask_user_overlay`.
-9. **NEVER claim you can see the screen unless you actually called `read_screen` (or `take_screenshot`/`read_screen_text`) in THIS turn.** When the user asks "что ты видишь" / "what do you see", call `read_screen` first and describe ONLY what's in the result; do not invent content.
+8. When you finish a sub-task and there is nothing else to do RIGHT NOW, call `done(summary)`.
+   Behaviour depends on user's settings:
+   - If "Auto-pause" is ON: the loop pauses after `done` and waits for the user's next message.
+   - If "Auto-pause" is OFF (default — game-coach mode): you stay running. Don't spam tools just
+     to "stay busy". If nothing meaningful happens on screen, output exactly `жду` (one word) and
+     return no tool calls — the loop will then nudge you with a system message; do NOT keep
+     repeating "если нужно что-то конкретное, скажите", that's spam.
+9. **NEVER claim you can see the screen unless you actually called `read_screen` / `take_screenshot` / `read_screen_text` in THIS turn, OR a fresh screenshot was injected by the system at the top of this turn (look for «Текущий кадр экрана»).** When the user asks "что ты видишь" / "what do you see", look at the latest screenshot in your context and describe ONLY what's in it; do not invent content.
 10. Reply in the user's language (default Russian) for user-facing strings (`speak`, `ask_user`, `ask_user_overlay`, `done.summary`).
 """
     }

@@ -54,6 +54,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             overlayAlpha = settings.overlayAlpha,
             sendScreenshots = settings.sendScreenshots,
             screenshotMaxDim = settings.screenshotMaxDim,
+            autoScreenshotEachTurn = settings.autoScreenshotEachTurn,
+            autoPauseOnIdle = settings.autoPauseOnIdle,
         ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -173,6 +175,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun updateSendScreenshots(value: Boolean) {
         settings.sendScreenshots = value
         _state.update { it.copy(sendScreenshots = value) }
+    }
+
+    fun updateAutoScreenshot(value: Boolean) {
+        settings.autoScreenshotEachTurn = value
+        _state.update { it.copy(autoScreenshotEachTurn = value) }
+    }
+
+    fun updateAutoPauseOnIdle(value: Boolean) {
+        settings.autoPauseOnIdle = value
+        _state.update { it.copy(autoPauseOnIdle = value) }
     }
 
     fun updateScreenshotMaxDim(value: Int) {
@@ -514,6 +526,8 @@ data class UiState(
     val overlayAlpha: Float = 0.5f,
     val sendScreenshots: Boolean = false,
     val screenshotMaxDim: Int = 1024,
+    val autoScreenshotEachTurn: Boolean = true,
+    val autoPauseOnIdle: Boolean = false,
 
     // Runtime permission status.
     val overlayGranted: Boolean = false,

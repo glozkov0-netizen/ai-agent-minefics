@@ -129,6 +129,26 @@ class Settings(context: Context) {
         get() = prefs.getInt(KEY_SCREENSHOT_MAX_DIM, DEFAULT_SCREENSHOT_MAX_DIM)
         set(value) = prefs.edit { putInt(KEY_SCREENSHOT_MAX_DIM, value) }
 
+    /**
+     * When true, the agent loop pauses after the model calls `done` or returns a plain text
+     * reply with no tool calls. The user resumes with «Продолжить». When false (default for
+     * the gameplay use-case) the agent keeps running until the user taps the overlay STOP
+     * button — useful when you want it to coach you live during a game.
+     */
+    var autoPauseOnIdle: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_PAUSE, DEFAULT_AUTO_PAUSE)
+        set(value) = prefs.edit { putBoolean(KEY_AUTO_PAUSE, value) }
+
+    /**
+     * When true, the agent automatically captures a fresh screenshot at the start of every
+     * step and injects it into the conversation as a user message. Means the model never has
+     * to remember to call `read_screen` itself; it always has the current screen state.
+     * Default true — required for gameplay where the screen is changing constantly.
+     */
+    var autoScreenshotEachTurn: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_SCREENSHOT, DEFAULT_AUTO_SCREENSHOT)
+        set(value) = prefs.edit { putBoolean(KEY_AUTO_SCREENSHOT, value) }
+
     companion object {
         const val PREFS_NAME = "agent_prefs"
         const val DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
@@ -151,6 +171,11 @@ class Settings(context: Context) {
         const val DEFAULT_OVERLAY_ALPHA = 0.5f
         const val DEFAULT_SEND_SCREENSHOTS = false
         const val DEFAULT_SCREENSHOT_MAX_DIM = 1024
+        // Game-mode defaults: never auto-pause, always have a fresh screenshot in front of the
+        // model. The user can flip these in Settings if they prefer the "ask once, get answer"
+        // pattern of a normal chatbot.
+        const val DEFAULT_AUTO_PAUSE = false
+        const val DEFAULT_AUTO_SCREENSHOT = true
 
         private const val KEY_API = "api_key"
         private const val KEY_BASE_URL = "base_url"
@@ -173,5 +198,7 @@ class Settings(context: Context) {
         private const val KEY_OVERLAY_ALPHA = "overlay_alpha"
         private const val KEY_SEND_SCREENSHOTS = "send_screenshots"
         private const val KEY_SCREENSHOT_MAX_DIM = "screenshot_max_dim"
+        private const val KEY_AUTO_PAUSE = "auto_pause_on_idle"
+        private const val KEY_AUTO_SCREENSHOT = "auto_screenshot_each_turn"
     }
 }
