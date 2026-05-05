@@ -535,17 +535,18 @@ class Agent(
             }
             "ask_user_overlay" -> {
                 val question = args.stringOf("question") ?: return ToolResult.error("Missing question")
-                onLog(AgentLog.AskUser("[overlay] $question"))
+                val options = args.stringListOf("options")
+                val labelHint = if (options != null) " [${options.joinToString(" / ")}]" else ""
+                onLog(AgentLog.AskUser("[overlay] $question$labelHint"))
                 val deferred = CompletableDeferred<String>()
                 OverlayService.Pending.deferred = deferred
-                OverlayService.showQuestion(context, question)
-                val choice = try {
+                OverlayService.showQuestion(context, question, options)
+                val answer = try {
                     deferred.await()
                 } finally {
                     OverlayService.Pending.deferred = null
                     OverlayService.hide(context)
                 }
-                val answer = if (choice == "open") askUser(question) else choice
                 ToolResult(
                     toolContent = answer,
                     summary = "overlay «$question» → «$answer»",
@@ -1040,6 +1041,11 @@ class Agent(
 
     private fun JsonObject.floatOf(key: String): Float? =
         (get(key) as? JsonPrimitive)?.contentOrNull?.toFloatOrNull()
+
+    private fun JsonObject.stringListOf(key: String): List<String>? =
+        (get(key) as? kotlinx.serialization.json.JsonArray)?.mapNotNull {
+            (it as? JsonPrimitive)?.contentOrNull
+        }?.takeIf { it.isNotEmpty() }
 
     companion object {
         private const val TAG = "Agent"

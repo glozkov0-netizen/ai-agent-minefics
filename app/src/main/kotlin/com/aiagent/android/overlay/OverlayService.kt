@@ -21,7 +21,13 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.core.view.setPadding
 import com.aiagent.android.data.Settings
+import com.aiagent.android.stt.SpeechToText
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 /**
  * Floating overlay window used by the agent to:
@@ -37,13 +43,14 @@ import kotlinx.coroutines.CompletableDeferred
 class OverlayService : Service() {
 
     private var windowManager: WindowManager? = null
-    private var rootView: View? = null
+    private var rootView: LinearLayout? = null
     private var titleView: TextView? = null
     private var bodyView: TextView? = null
-    private var yesButton: Button? = null
-    private var noButton: Button? = null
-    private var openButton: Button? = null
+    private var buttonsRow: LinearLayout? = null
+    private var voiceButton: Button? = null
     private var dismissButton: Button? = null
+    private var voiceJob: Job? = null
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private var stopRoot: View? = null
 
@@ -51,7 +58,11 @@ class OverlayService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_SHOW_QUESTION -> showQuestion(intent.getStringExtra(EXTRA_TEXT) ?: "")
+            ACTION_SHOW_QUESTION -> {
+                val text = intent.getStringExtra(EXTRA_TEXT) ?: ""
+                val opts = intent.getStringArrayExtra(EXTRA_OPTIONS)?.toList()
+                showQuestion(text, opts)
+            }
             ACTION_SHOW_STATUS -> showStatus(intent.getStringExtra(EXTRA_TEXT) ?: "")
             ACTION_HIDE -> hideAll()
             ACTION_SHOW_STOP -> showStopButton()
@@ -89,35 +100,98 @@ class OverlayService : Service() {
             setPadding(0, dp(6), 0, dp(8))
         }
 
-        val buttonsRow = LinearLayout(ctx).apply {
+        // Buttons row is now built dynamically per question — see populateOptions().
+        val row = LinearLayout(ctx).apply {
             orientation = LinearLayout.HORIZONTAL
         }
-        yesButton = makeButton(ctx, "Да", Color.parseColor("#1B5E20")) { deliver("yes") }
-        noButton = makeButton(ctx, "Нет", Color.parseColor("#B71C1C")) { deliver("no") }
-        openButton = makeButton(ctx, "Открыть", Color.parseColor("#0D47A1")) {
-            val launch = packageManager.getLaunchIntentForPackage(packageName)?.apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-            }
-            if (launch != null) startActivity(launch)
-            deliver("open")
-        }
-        dismissButton = makeButton(ctx, "✕", Color.parseColor("#424242")) {
-            deliver("dismiss")
-            hideAll()
-        }
-        listOf(yesButton, noButton, openButton, dismissButton).forEach { btn ->
-            val lp = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
-                marginEnd = dp(4)
-            }
-            buttonsRow.addView(btn, lp)
-        }
+        buttonsRow = row
 
         container.addView(titleView)
         container.addView(bodyView)
-        container.addView(buttonsRow)
+        container.addView(row)
 
         rootView = container
         attachDragHandler(container)
+    }
+
+    /**
+     * Render the answer buttons for a question. If [options] is null/empty we fall back to
+     * the classic Да / Нет / 🎤 / ✕ row. With options, each becomes a labeled button (truncated
+     * to ~16 chars). The mic button always gets shown — the user can answer by voice without
+     * leaving the game.
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun populateOptions(options: List<String>?) {
+        val ctx: Context = this
+        val row = buttonsRow ?: return
+        row.removeAllViews()
+        val effective = options?.take(6)?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
+        if (effective.isEmpty()) {
+            // Default yes/no flow.
+            row.addView(makeRowChild(makeButton(ctx, "Да", Color.parseColor("#1B5E20")) { deliver("yes") }))
+            row.addView(makeRowChild(makeButton(ctx, "Нет", Color.parseColor("#B71C1C")) { deliver("no") }))
+        } else {
+            for ((idx, opt) in effective.withIndex()) {
+                val short = if (opt.length > 22) opt.take(20) + "…" else opt
+                val color = optionColor(idx)
+                row.addView(makeRowChild(makeButton(ctx, short, color) { deliver(opt) }))
+            }
+        }
+        voiceButton = makeButton(ctx, "🎤", Color.parseColor("#4527A0")) { startVoiceAnswer() }
+        dismissButton = makeButton(ctx, "✕", Color.parseColor("#424242")) {
+            cancelVoiceAnswer()
+            deliver("dismiss")
+            hideAll()
+        }
+        row.addView(makeRowChild(voiceButton!!))
+        row.addView(makeRowChild(dismissButton!!))
+    }
+
+    private fun makeRowChild(btn: Button): Button {
+        btn.layoutParams = LinearLayout.LayoutParams(
+            0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+        ).apply { marginEnd = dp(4) }
+        return btn
+    }
+
+    private fun optionColor(index: Int): Int = when (index % 6) {
+        0 -> Color.parseColor("#1B5E20") // green
+        1 -> Color.parseColor("#0D47A1") // blue
+        2 -> Color.parseColor("#4A148C") // purple
+        3 -> Color.parseColor("#BF360C") // orange-red
+        4 -> Color.parseColor("#1B5E20") // green again
+        else -> Color.parseColor("#37474F") // blue grey
+    }
+
+    private fun startVoiceAnswer() {
+        val current = voiceJob
+        if (current?.isActive == true) {
+            // Tap-to-cancel.
+            cancelVoiceAnswer()
+            voiceButton?.text = "🎤"
+            return
+        }
+        voiceButton?.text = "● слушаю"
+        bodyView?.append("\n\n[слушаю — говори…]")
+        voiceJob = serviceScope.launch {
+            val stt = SpeechToText(applicationContext, Settings(applicationContext))
+            val transcript = try {
+                stt.listenLive(language = null)
+            } catch (e: Exception) {
+                "[ошибка распознавания: ${e.message ?: e::class.java.simpleName}]"
+            }
+            voiceButton?.text = "🎤"
+            if (transcript.isNotBlank() && !transcript.startsWith("[")) {
+                deliver(transcript)
+            } else {
+                bodyView?.append("\n$transcript — попробуй ещё раз")
+            }
+        }
+    }
+
+    private fun cancelVoiceAnswer() {
+        voiceJob?.cancel()
+        voiceJob = null
     }
 
     private fun makeButton(ctx: Context, text: String, bg: Int, onClick: (View) -> Unit): Button =
@@ -156,13 +230,14 @@ class OverlayService : Service() {
         }
     }
 
-    private fun showQuestion(text: String) {
+    private fun showQuestion(text: String, options: List<String>?) {
         ensureView()
         val view = rootView ?: return
         if (view.parent == null) attach(view)
         titleView?.text = "Агент спрашивает"
         bodyView?.text = text
-        listOf(yesButton, noButton, openButton, dismissButton).forEach { it?.visibility = View.VISIBLE }
+        populateOptions(options)
+        buttonsRow?.visibility = View.VISIBLE
     }
 
     private fun showStatus(text: String) {
@@ -171,11 +246,8 @@ class OverlayService : Service() {
         if (view.parent == null) attach(view)
         titleView?.text = "AI Agent"
         bodyView?.text = text
-        // For status-only display we hide yes/no.
-        yesButton?.visibility = View.GONE
-        noButton?.visibility = View.GONE
-        openButton?.visibility = View.VISIBLE
-        dismissButton?.visibility = View.VISIBLE
+        // For status-only display we hide the buttons row.
+        buttonsRow?.visibility = View.GONE
     }
 
     private fun attach(view: View) {
@@ -304,6 +376,7 @@ class OverlayService : Service() {
     }
 
     private fun hideAll() {
+        cancelVoiceAnswer()
         val view = rootView
         if (view != null) {
             runCatching { windowManager?.removeView(view) }
@@ -311,9 +384,8 @@ class OverlayService : Service() {
         rootView = null
         titleView = null
         bodyView = null
-        yesButton = null
-        noButton = null
-        openButton = null
+        buttonsRow = null
+        voiceButton = null
         dismissButton = null
     }
 
@@ -350,6 +422,7 @@ class OverlayService : Service() {
         const val ACTION_SHOW_STOP = "com.aiagent.android.OVERLAY_SHOW_STOP"
         const val ACTION_HIDE_STOP = "com.aiagent.android.OVERLAY_HIDE_STOP"
         const val EXTRA_TEXT = "text"
+        const val EXTRA_OPTIONS = "options"
 
         /** Screen-space bounds of the persistent STOP button while it's visible. Used by
          *  AgentAccessibilityService to refuse `tap_at` / `swipe_at` calls that would land on it. */
@@ -360,10 +433,13 @@ class OverlayService : Service() {
         @Volatile
         var stopListener: (() -> Unit)? = null
 
-        fun showQuestion(context: Context, text: String) {
+        fun showQuestion(context: Context, text: String, options: List<String>? = null) {
             val intent = Intent(context, OverlayService::class.java).apply {
                 action = ACTION_SHOW_QUESTION
                 putExtra(EXTRA_TEXT, text)
+                if (!options.isNullOrEmpty()) {
+                    putExtra(EXTRA_OPTIONS, options.toTypedArray())
+                }
             }
             context.startService(intent)
         }

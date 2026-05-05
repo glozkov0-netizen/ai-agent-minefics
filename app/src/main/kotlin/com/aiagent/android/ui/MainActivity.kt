@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -211,6 +212,7 @@ fun AppRoot(
                     onClearLog = viewModel::clearLog,
                     onPendingAnswer = viewModel::updatePendingAnswer,
                     onSubmitAnswer = viewModel::submitAnswer,
+                    onVoiceInstruction = viewModel::toggleVoiceInstructionInput,
                     onAllowProjection = onRequestProjection,
                     onOpenAccessibility = {
                         context.startActivity(
@@ -273,6 +275,7 @@ fun AgentTab(
     onClearLog: () -> Unit,
     onPendingAnswer: (String) -> Unit,
     onSubmitAnswer: () -> Unit,
+    onVoiceInstruction: () -> Unit,
     onAllowProjection: () -> Unit,
     onOpenAccessibility: () -> Unit,
 ) {
@@ -303,16 +306,41 @@ fun AgentTab(
             }
         }
         Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value = state.instruction,
-            onValueChange = onInstruction,
-            label = { Text("Что должен сделать агент?") },
-            placeholder = { Text("например: Открой Настройки и включи режим энергосбережения") },
+        Row(
             modifier = Modifier.fillMaxWidth(),
-            minLines = 2,
-            maxLines = 5,
-            enabled = !state.running,
-        )
+            verticalAlignment = Alignment.Top,
+        ) {
+            OutlinedTextField(
+                value = state.instruction,
+                onValueChange = onInstruction,
+                label = { Text("Что должен сделать агент?") },
+                placeholder = { Text("например: Открой Настройки и включи режим энергосбережения") },
+                modifier = Modifier.weight(1f),
+                minLines = 2,
+                maxLines = 5,
+                enabled = !state.running,
+            )
+            Spacer(Modifier.width(8.dp))
+            Button(
+                onClick = onVoiceInstruction,
+                enabled = !state.running,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = if (state.listeningInstruction) Color(0xFFC62828) else Color(0xFF4527A0),
+                    contentColor = Color.White,
+                ),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                modifier = Modifier.height(56.dp),
+            ) {
+                Text(if (state.listeningInstruction) "● стоп" else "🎤")
+            }
+        }
+        if (state.listeningInstruction) {
+            Text(
+                "Слушаю — говори. Нажми снова, чтобы отменить.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFFC62828),
+            )
+        }
         Spacer(Modifier.height(8.dp))
         if (state.running) {
             Button(

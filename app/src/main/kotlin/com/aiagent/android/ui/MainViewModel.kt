@@ -250,6 +250,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(instruction = value) }
     }
 
+    private var listenJob: Job? = null
+
+    /**
+     * Capture a voice instruction and append to (or replace) the current instruction field.
+     * Toggleable: tap once to start, tap again to cancel. Used so the user doesn't have to
+     * type to continue/start the agent.
+     */
+    fun toggleVoiceInstructionInput() {
+        val current = listenJob
+        if (current?.isActive == true) {
+            current.cancel()
+            listenJob = null
+            _state.update { it.copy(listeningInstruction = false) }
+            return
+        }
+        _state.update { it.copy(listeningInstruction = true) }
+        listenJob = viewModelScope.launch {
+            val app = getApplication<Application>()
+            val transcript = try {
+                com.aiagent.android.stt.SpeechToText(app, settings).listenLive(language = null)
+            } catch (e: Exception) {
+                "[ошибка распознавания: ${e.message ?: e::class.java.simpleName}]"
+            }
+            _state.update { it.copy(listeningInstruction = false) }
+            if (transcript.isNotBlank() && !transcript.startsWith("[")) {
+                val existing = _state.value.instruction
+                val combined = if (existing.isBlank()) transcript else "$existing $transcript"
+                _state.update { it.copy(instruction = combined) }
+            } else {
+                appendLog(LogEntry.System("Голос: $transcript"))
+            }
+        }
+    }
+
     /**
      * Start (or resume) the agent. If [conversation] already has prior messages, the new
      * instruction is appended and the loop continues from where it left off ("Продолжить");
@@ -512,6 +546,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 data class UiState(
     val instruction: String = "",
     val running: Boolean = false,
+    /** True while the platform SpeechRecognizer is actively listening for the instruction field. */
+    val listeningInstruction: Boolean = false,
     val serviceEnabled: Boolean = false,
     val apiKey: String = "",
     val baseUrl: String = "",

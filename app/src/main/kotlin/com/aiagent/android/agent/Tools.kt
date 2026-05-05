@@ -219,16 +219,28 @@ object Tools {
 
     private val askUserOverlay = FunctionDef(
         name = "ask_user_overlay",
-        description = "Ask the user a quick yes/no question via a 50%-transparent floating overlay " +
-            "that stays on top of the current app (so it works during gameplay). The user can " +
-            "answer 'yes' / 'no' / 'open' (open the app for a free-form text reply) / 'dismiss'. " +
-            "The result is one of those keywords or the user's typed answer if they tapped 'open'.",
+        description = "Ask the user a question via a floating overlay that stays on top of the " +
+            "current app (works during gameplay). Pass a question string and optionally an " +
+            "`options` array (1–6 short choices) to render as buttons — like a quiz. The user " +
+            "can also tap the microphone button to answer by voice without leaving the game, " +
+            "or tap '✕' to dismiss. " +
+            "Result: the chosen option text, or the spoken answer (text), or 'dismiss'. " +
+            "If no options array is provided, the buttons are 'Да' / 'Нет' / '🎤 Голос' / '✕'.",
         parameters = obj {
             put("type", "object")
             putJsonObject("properties") {
                 putJsonObject("question") {
                     put("type", "string")
-                    put("description", "Short yes/no question, one or two sentences max.")
+                    put("description", "Short question, one or two sentences max.")
+                }
+                putJsonObject("options") {
+                    put("type", "array")
+                    put("description", "Optional 1–6 short answer choices to show as buttons " +
+                        "(e.g. ['Идти налево', 'Идти направо', 'Подождать']). If omitted, " +
+                        "yes/no buttons are used.")
+                    putJsonObject("items") {
+                        put("type", "string")
+                    }
                 }
             }
             put("required", arr("question"))
