@@ -29,6 +29,8 @@ import com.aiagent.android.tts.TtsManager
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.boolean
@@ -77,6 +79,10 @@ class Agent(
     private val micRecorder = MicRecorder()
 
     @Volatile private var lastScreenshotMs: Long = 0L
+
+    /** Set to true the first time the user denies MediaProjection consent in a run. We don't
+     *  pester them again on subsequent screenshot requests within the same run. */
+    @Volatile private var projectionDenied: Boolean = false
 
     /**
      * Run the agent loop using an externally-owned conversation list. The caller (typically
@@ -128,6 +134,12 @@ class Agent(
                 val effort = settings.reasoningEffort.takeIf {
                     it.isNotBlank() && supportsReasoningEffort(settings.model)
                 }
+                // Drop all but the most recent N screenshots from the history before sending.
+                // Vision-capable models on Groq cap inputs at 5 images per request; without this
+                // we'd hit HTTP 400 'Too many images provided' after a handful of read_screen
+                // calls. Older image messages are replaced by a short text marker so the
+                // assistant still sees that something happened, just without the pixels.
+                trimOldScreenshots(messages, keep = MAX_IMAGES_IN_HISTORY)
                 val baseRequest = ChatRequest(
                     model = settings.model,
                     messages = messages,
@@ -168,6 +180,14 @@ class Agent(
                                 ),
                             )
                             client.chat(baseRequest.copy(temperature = 0.0))
+                        }
+                        msg.startsWith("HTTP 400") &&
+                            (msg.contains("Too many images", ignoreCase = true) ||
+                                msg.contains("image", ignoreCase = true) &&
+                                msg.contains("limit", ignoreCase = true)) -> {
+                            onLog(AgentLog.Error("Слишком много картинок в истории — выкидываю все, кроме последней, и пробую снова."))
+                            trimOldScreenshots(messages, keep = 1)
+                            client.chat(baseRequest.copy(messages = messages))
                         }
                         else -> throw e
                     }
@@ -712,13 +732,18 @@ class Agent(
 
         // Slow path: MediaProjection. Start the capture service if it isn't running yet.
         if (!ScreenCaptureService.isRunning) {
+            // The user already declined this run; don't pop the system dialog again.
+            if (projectionDenied) return null
             val ok = try {
                 ensureCaptureService()
             } catch (e: Exception) {
                 onLog(AgentLog.Error("Не удалось запустить захват экрана: ${e.message}"))
                 false
             }
-            if (!ok) return null
+            if (!ok) {
+                projectionDenied = true
+                return null
+            }
         }
         return ScreenCaptureService.captureFrame()
     }
@@ -774,6 +799,47 @@ class Agent(
     /** True if the agent should attach screenshots to LLM messages this run. */
     private fun visionEnabled(): Boolean =
         settings.sendScreenshots || supportsVision(settings.model)
+
+    /**
+     * Walk the conversation in reverse and keep only the [keep] most recent multimodal
+     * (image-bearing) user messages. Older multimodal messages are rewritten in place to
+     * plain-text so the API stops counting them as images. Llama-4 on Groq currently caps
+     * inputs at 5 images per request — without this we hit
+     * `HTTP 400: Too many images provided` after a handful of read_screen calls.
+     */
+    private fun trimOldScreenshots(messages: MutableList<ChatMessage>, keep: Int) {
+        var imagesRemaining = keep
+        for (i in messages.indices.reversed()) {
+            val msg = messages[i]
+            val content = msg.content ?: continue
+            if (content !is JsonArray) continue
+            // Multimodal message. If we still have budget, leave it; otherwise replace with text.
+            if (imagesRemaining > 0) {
+                imagesRemaining--
+                continue
+            }
+            val plainText = extractTextFromMultimodal(content)
+            messages[i] = ChatMessage(
+                role = msg.role,
+                content = JsonPrimitive(
+                    if (plainText.isBlank()) "[старый скриншот опущен для экономии токенов]"
+                    else "$plainText [скриншот опущен]",
+                ),
+                toolCalls = msg.toolCalls,
+                toolCallId = msg.toolCallId,
+                name = msg.name,
+            )
+        }
+    }
+
+    private fun extractTextFromMultimodal(content: JsonElement): String {
+        if (content !is JsonArray) return ""
+        return content.joinToString(" ") { part ->
+            val obj = (part as? JsonObject) ?: return@joinToString ""
+            val type = obj["type"]?.jsonPrimitive?.contentOrNull
+            if (type == "text") obj["text"]?.jsonPrimitive?.contentOrNull.orEmpty() else ""
+        }.trim()
+    }
 
     /** True if the given screen-pixel point falls inside the persistent overlay STOP button.
      *  Used to refuse tap_at / swipe_at calls so the AI cannot click its own kill switch. */
@@ -847,6 +913,9 @@ class Agent(
 
     companion object {
         private const val TAG = "Agent"
+        /** Vision-capable models on Groq cap inputs at 5 images/request; 3 keeps headroom for
+         *  the model's own returned tool messages without hitting the limit. */
+        private const val MAX_IMAGES_IN_HISTORY = 3
         private const val SYSTEM_PROMPT = """You are an AI agent that lives on the user's Android phone and helps them — especially during gameplay. You can observe the screen, listen to audio, speak, write files, and control the UI through Accessibility.
 
 You have these tools:
