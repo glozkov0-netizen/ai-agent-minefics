@@ -166,6 +166,37 @@ class Settings(context: Context) {
             ?: DEFAULT_VISION_DESCRIBER_MODEL
         set(value) = prefs.edit { putString(KEY_VISION_DESCRIBER_MODEL, value) }
 
+    // --- Virtual joystick overlay ---------------------------------------------------------------
+
+    /** When true, the floating virtual joystick is shown on top of all apps. */
+    var joystickEnabled: Boolean
+        get() = prefs.getBoolean(KEY_JOYSTICK_ENABLED, DEFAULT_JOYSTICK_ENABLED)
+        set(value) = prefs.edit { putBoolean(KEY_JOYSTICK_ENABLED, value) }
+
+    /** X coordinate (px, screen-space) of the joystick base centre. */
+    var joystickX: Int
+        get() = prefs.getInt(KEY_JOYSTICK_X, DEFAULT_JOYSTICK_X)
+        set(value) = prefs.edit { putInt(KEY_JOYSTICK_X, value) }
+
+    /** Y coordinate (px, screen-space) of the joystick base centre. */
+    var joystickY: Int
+        get() = prefs.getInt(KEY_JOYSTICK_Y, DEFAULT_JOYSTICK_Y)
+        set(value) = prefs.edit { putInt(KEY_JOYSTICK_Y, value) }
+
+    /** Radius (px) of the joystick base. The thumb travels within this circle. */
+    var joystickRadius: Int
+        get() = prefs.getInt(KEY_JOYSTICK_RADIUS, DEFAULT_JOYSTICK_RADIUS)
+        set(value) = prefs.edit { putInt(KEY_JOYSTICK_RADIUS, value) }
+
+    /**
+     * When true, dragging the overlay joystick generates a synchronized in-app drag at the
+     * SAME screen coordinates via the AccessibilityService. Use case: place the overlay
+     * joystick directly over the game's built-in joystick — the gesture passes through.
+     */
+    var joystickDispatch: Boolean
+        get() = prefs.getBoolean(KEY_JOYSTICK_DISPATCH, DEFAULT_JOYSTICK_DISPATCH)
+        set(value) = prefs.edit { putBoolean(KEY_JOYSTICK_DISPATCH, value) }
+
     companion object {
         const val PREFS_NAME = "agent_prefs"
         const val DEFAULT_BASE_URL = "https://api.groq.com/openai/v1"
@@ -198,6 +229,12 @@ class Settings(context: Context) {
         const val DEFAULT_USE_VISION_DESCRIBER = false
         const val DEFAULT_VISION_DESCRIBER_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
+        const val DEFAULT_JOYSTICK_ENABLED = false
+        const val DEFAULT_JOYSTICK_X = 250
+        const val DEFAULT_JOYSTICK_Y = 900
+        const val DEFAULT_JOYSTICK_RADIUS = 180
+        const val DEFAULT_JOYSTICK_DISPATCH = true
+
         private const val KEY_API = "api_key"
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_MODEL = "model"
@@ -223,5 +260,10 @@ class Settings(context: Context) {
         private const val KEY_AUTO_SCREENSHOT = "auto_screenshot_each_turn"
         private const val KEY_USE_VISION_DESCRIBER = "use_vision_describer"
         private const val KEY_VISION_DESCRIBER_MODEL = "vision_describer_model"
+        private const val KEY_JOYSTICK_ENABLED = "joystick_enabled"
+        private const val KEY_JOYSTICK_X = "joystick_x"
+        private const val KEY_JOYSTICK_Y = "joystick_y"
+        private const val KEY_JOYSTICK_RADIUS = "joystick_radius"
+        private const val KEY_JOYSTICK_DISPATCH = "joystick_dispatch"
     }
 }

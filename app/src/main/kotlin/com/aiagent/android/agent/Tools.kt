@@ -30,6 +30,7 @@ object Tools {
         Tool(function = askUser),
         Tool(function = askUserOverlay),
         Tool(function = speak),
+        Tool(function = joystickMove),
         Tool(function = listenMic),
         Tool(function = recordAudioAndTranscribe),
         Tool(function = deviceInfo),
@@ -265,6 +266,51 @@ object Tools {
                 }
             }
             put("required", arr("text"))
+        },
+    )
+
+    private val joystickMove = FunctionDef(
+        name = "joystick_move",
+        description = "Push the virtual joystick overlay in a direction for a duration, then " +
+            "release. Useful for moving a character in 2D games. Requires the user to have " +
+            "enabled the joystick overlay AND placed it over the game's built-in joystick. " +
+            "Direction can be 'north'/'south'/'east'/'west'/'northeast'/'northwest'/" +
+            "'southeast'/'southwest', or an arbitrary angle in degrees (0=east, 90=south, " +
+            "180=west, 270=north). Returns immediately; the move continues in the background.",
+        parameters = obj {
+            put("type", "object")
+            putJsonObject("properties") {
+                putJsonObject("direction") {
+                    put("type", "string")
+                    put(
+                        "description",
+                        "One of: north, south, east, west, northeast, northwest, southeast, southwest. " +
+                            "Or use 'angle' for an arbitrary direction.",
+                    )
+                }
+                putJsonObject("angle") {
+                    put("type", "number")
+                    put(
+                        "description",
+                        "Angle in degrees (0=east, 90=south, 180=west, 270=north). " +
+                            "Use this OR `direction`, not both.",
+                    )
+                }
+                putJsonObject("magnitude") {
+                    put("type", "number")
+                    put(
+                        "description",
+                        "Stick deflection 0..1 (1 = full push, 0.5 = half). Default 1.0.",
+                    )
+                }
+                putJsonObject("duration_ms") {
+                    put("type", "integer")
+                    put(
+                        "description",
+                        "How long to hold the stick (ms) before releasing. Default 600.",
+                    )
+                }
+            }
         },
     )
 

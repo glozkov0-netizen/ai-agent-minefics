@@ -582,6 +582,42 @@ class Agent(
                     summary = "услышано: «${transcript.take(80)}»",
                 )
             }
+            "joystick_move" -> {
+                if (!com.aiagent.android.overlay.JoystickOverlayService.isActive()) {
+                    return ToolResult.error(
+                        "Виртуальный джойстик не включён. Попроси пользователя включить его в " +
+                            "приложении (вкладка «Агент» → переключатель «Виртуальный джойстик») " +
+                            "и расположить поверх внутриигрового джойстика.",
+                    )
+                }
+                val direction = args.stringOf("direction")?.lowercase()
+                val angleArg = args.floatOf("angle")
+                val angle = angleArg ?: when (direction) {
+                    "east", "right", "восток" -> 0f
+                    "southeast" -> 45f
+                    "south", "down", "юг" -> 90f
+                    "southwest" -> 135f
+                    "west", "left", "запад" -> 180f
+                    "northwest" -> 225f
+                    "north", "up", "север" -> 270f
+                    "northeast" -> 315f
+                    else -> return ToolResult.error(
+                        "Укажи direction (north/south/east/west/...) или angle в градусах.",
+                    )
+                }
+                val magnitude = (args.floatOf("magnitude") ?: 1.0f).coerceIn(0.05f, 1f)
+                val durationMs = (args.intOf("duration_ms") ?: 600).coerceIn(50, 5000).toLong()
+                com.aiagent.android.overlay.JoystickOverlayService.push(
+                    context = context,
+                    angleDeg = angle,
+                    magnitude = magnitude,
+                    durationMs = durationMs,
+                )
+                ToolResult(
+                    toolContent = "Joystick pushed at angle ${angle}° magnitude $magnitude for ${durationMs}ms",
+                    summary = "джойстик ${direction ?: "${angle}°"} ($magnitude × $durationMs мс)",
+                )
+            }
             "record_audio" -> {
                 val seconds = (args.intOf("seconds") ?: 6).coerceIn(1, 60)
                 val lang = args.stringOf("language")

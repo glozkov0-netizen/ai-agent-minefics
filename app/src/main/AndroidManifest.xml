@@ -77,6 +77,10 @@
             android:exported="false" />
 
         <service
+            android:name=".overlay.JoystickOverlayService"
+            android:exported="false" />
+
+        <service
             android:name=".service.AgentAccessibilityService"
             android:exported="true"
             android:label="@string/accessibility_service_label"

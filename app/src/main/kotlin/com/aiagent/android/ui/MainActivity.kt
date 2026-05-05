@@ -213,6 +213,8 @@ fun AppRoot(
                     onPendingAnswer = viewModel::updatePendingAnswer,
                     onSubmitAnswer = viewModel::submitAnswer,
                     onVoiceInstruction = viewModel::toggleVoiceInstructionInput,
+                    onJoystickEnabled = viewModel::updateJoystickEnabled,
+                    onJoystickDispatch = viewModel::updateJoystickDispatch,
                     onAllowProjection = onRequestProjection,
                     onOpenAccessibility = {
                         context.startActivity(
@@ -276,6 +278,8 @@ fun AgentTab(
     onPendingAnswer: (String) -> Unit,
     onSubmitAnswer: () -> Unit,
     onVoiceInstruction: () -> Unit,
+    onJoystickEnabled: (Boolean) -> Unit,
+    onJoystickDispatch: (Boolean) -> Unit,
     onAllowProjection: () -> Unit,
     onOpenAccessibility: () -> Unit,
 ) {
@@ -379,6 +383,48 @@ fun AgentTab(
                         "«Начать заново» сбросит историю.",
                     style = MaterialTheme.typography.bodySmall,
                 )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = if (state.joystickEnabled) Color(0xFFD1C4E9) else Color(0xFFEEEEEE),
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "🕹️  Виртуальный джойстик",
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Switch(
+                        checked = state.joystickEnabled,
+                        onCheckedChange = onJoystickEnabled,
+                    )
+                }
+                if (state.joystickEnabled) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Долгое нажатие на джойстик → режим настройки: тяни одним пальцем чтобы " +
+                            "переместить, разводи двумя — чтобы изменить размер, тапни ещё раз " +
+                            "чтобы выйти. Поставь его поверх внутриигрового джойстика.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Switch(
+                            checked = state.joystickDispatch,
+                            onCheckedChange = onJoystickDispatch,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "Передавать жесты в игру (через спецвозможности)",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
             }
         }
         if (state.pendingQuestion != null) {

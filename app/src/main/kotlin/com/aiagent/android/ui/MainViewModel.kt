@@ -58,6 +58,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             autoPauseOnIdle = settings.autoPauseOnIdle,
             useVisionDescriber = settings.useVisionDescriber,
             visionDescriberModel = settings.visionDescriberModel,
+            joystickEnabled = settings.joystickEnabled,
+            joystickDispatch = settings.joystickDispatch,
         ),
     )
     val state: StateFlow<UiState> = _state.asStateFlow()
@@ -76,6 +78,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         refreshPermissionStatus()
         // Wire the overlay STOP button click into the same code path as the in-app cancel.
         OverlayService.stopListener = { cancelAgent() }
+        // Restore the joystick overlay if the user had it enabled in a previous session.
+        if (settings.joystickEnabled) {
+            com.aiagent.android.overlay.JoystickOverlayService.show(getApplication())
+        }
     }
 
     override fun onCleared() {
@@ -197,6 +203,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun updateVisionDescriberModel(value: String) {
         settings.visionDescriberModel = value
         _state.update { it.copy(visionDescriberModel = value) }
+    }
+
+    fun updateJoystickEnabled(value: Boolean) {
+        settings.joystickEnabled = value
+        _state.update { it.copy(joystickEnabled = value) }
+        val ctx = getApplication<Application>()
+        if (value) {
+            com.aiagent.android.overlay.JoystickOverlayService.show(ctx)
+        } else {
+            com.aiagent.android.overlay.JoystickOverlayService.hide(ctx)
+        }
+    }
+
+    fun updateJoystickDispatch(value: Boolean) {
+        settings.joystickDispatch = value
+        _state.update { it.copy(joystickDispatch = value) }
     }
 
     fun updateScreenshotMaxDim(value: Int) {
@@ -578,6 +600,8 @@ data class UiState(
     val autoPauseOnIdle: Boolean = false,
     val useVisionDescriber: Boolean = false,
     val visionDescriberModel: String = "meta-llama/llama-4-scout-17b-16e-instruct",
+    val joystickEnabled: Boolean = false,
+    val joystickDispatch: Boolean = true,
 
     // Runtime permission status.
     val overlayGranted: Boolean = false,

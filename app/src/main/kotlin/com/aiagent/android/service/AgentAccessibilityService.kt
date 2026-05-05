@@ -164,6 +164,89 @@ class AgentAccessibilityService : AccessibilityService() {
         return dispatchAndWait(gesture)
     }
 
+    // --- Continuous "joystick" drag --------------------------------------------------------------
+    // The joystick overlay calls these to keep a single touch-down active in the underlying app
+    // while the user (or AI) moves the thumb. Each segment is dispatched with willContinue=true
+    // so the touch is not lifted between updates; the final segment uses willContinue=false.
+
+    @Volatile
+    private var jsLastStroke: GestureDescription.StrokeDescription? = null
+    @Volatile
+    private var jsLastX: Float = 0f
+    @Volatile
+    private var jsLastY: Float = 0f
+    private val jsLock = Any()
+
+    /** Begin a joystick stroke at the given screen coordinates. */
+    fun joystickBegin(x: Float, y: Float, durationMs: Long = 16L) {
+        synchronized(jsLock) {
+            val path = Path().apply {
+                moveTo(x, y)
+                // Tiny offset so the stroke has non-zero length; many engines drop zero-length paths.
+                lineTo(x + 0.001f, y + 0.001f)
+            }
+            val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs, true)
+            val ok = dispatchGesture(
+                GestureDescription.Builder().addStroke(stroke).build(),
+                null,
+                mainHandler,
+            )
+            if (ok) {
+                jsLastStroke = stroke
+                jsLastX = x
+                jsLastY = y
+            } else {
+                jsLastStroke = null
+            }
+        }
+    }
+
+    /** Continue a joystick stroke to a new position. */
+    fun joystickUpdate(x: Float, y: Float, durationMs: Long = 16L) {
+        synchronized(jsLock) {
+            val previous = jsLastStroke ?: return
+            val path = Path().apply {
+                moveTo(jsLastX, jsLastY)
+                lineTo(x, y)
+            }
+            val next = previous.continueStroke(path, 0L, durationMs, true)
+            val ok = dispatchGesture(
+                GestureDescription.Builder().addStroke(next).build(),
+                null,
+                mainHandler,
+            )
+            if (ok) {
+                jsLastStroke = next
+                jsLastX = x
+                jsLastY = y
+            } else {
+                jsLastStroke = null
+            }
+        }
+    }
+
+    /** End a joystick stroke (touch is lifted). */
+    fun joystickEnd(x: Float, y: Float, durationMs: Long = 16L) {
+        synchronized(jsLock) {
+            val previous = jsLastStroke
+            if (previous != null) {
+                val path = Path().apply {
+                    moveTo(jsLastX, jsLastY)
+                    lineTo(x, y)
+                }
+                val finish = previous.continueStroke(path, 0L, durationMs, false)
+                runCatching {
+                    dispatchGesture(
+                        GestureDescription.Builder().addStroke(finish).build(),
+                        null,
+                        mainHandler,
+                    )
+                }
+            }
+            jsLastStroke = null
+        }
+    }
+
     /** Tap a captured node (by id from the most-recent ScreenState). */
     suspend fun tapNode(node: UiNode): Boolean {
         val cx = node.bounds.centerX()
