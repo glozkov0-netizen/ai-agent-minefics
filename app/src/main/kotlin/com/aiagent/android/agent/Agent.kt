@@ -22,6 +22,7 @@ import com.aiagent.android.llm.userImageMessage
 import com.aiagent.android.ocr.OcrEngine
 import com.aiagent.android.overlay.OverlayService
 import com.aiagent.android.service.AgentAccessibilityService
+import com.aiagent.android.service.ScreenCaptureService
 import com.aiagent.android.service.ScreenState
 import com.aiagent.android.stt.SpeechToText
 import com.aiagent.android.tts.TtsManager
@@ -56,6 +57,15 @@ class Agent(
     private val askUser: suspend (String) -> String,
     private val startScreenRecording: suspend () -> String,
     private val stopScreenRecording: suspend () -> String,
+    /**
+     * Called when the Accessibility `takeScreenshot()` API can't deliver a bitmap (e.g. on
+     * Realme / Vivo / older API ROMs that block it for non-system services). The implementer is
+     * expected to ask the user for MediaProjection consent and start the [ScreenCaptureService].
+     * Returns true if a capture service is now running, false if the user denied consent or the
+     * device doesn't support MediaProjection at all. Subsequent screenshots will be served from
+     * [ScreenCaptureService.captureFrame].
+     */
+    private val ensureCaptureService: suspend () -> Boolean,
     private val onLog: suspend (AgentLog) -> Unit,
 ) {
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -296,7 +306,7 @@ class Agent(
             "read_screen_text" -> {
                 val bitmap = throttleAndCapture(service)
                 if (bitmap == null) {
-                    ToolResult.error("Не удалось получить изображение экрана. На Android < 11 OCR не поддерживается без MediaProjection.")
+                    ToolResult.error("Не удалось получить изображение экрана. Пользователь отказал в разрешении захвата экрана.")
                 } else {
                     val text = try {
                         OcrEngine.extractText(bitmap)
@@ -675,7 +685,14 @@ class Agent(
         }
     }
 
-    /** Capture a screen bitmap, throttled by `Settings.screenFps`. */
+    /**
+     * Capture a screen bitmap, throttled by `Settings.screenFps`.
+     *
+     * Tries the Accessibility `takeScreenshot()` API first (no extra permission, no notification).
+     * If that fails — which happens on Android < 11 and on a number of OEM ROMs (Realme, Vivo,
+     * Xiaomi MIUI in particular) — we fall back to MediaProjection: ask the user for one-time
+     * consent, start a long-lived [ScreenCaptureService], and pull frames from its ImageReader.
+     */
     private suspend fun throttleAndCapture(service: AgentAccessibilityService): Bitmap? {
         val fps = settings.screenFps
         if (fps > 0f) {
@@ -686,7 +703,24 @@ class Agent(
             }
         }
         lastScreenshotMs = System.currentTimeMillis()
-        return service.captureBitmap()
+
+        // Fast path: Accessibility takeScreenshot.
+        if (!ScreenCaptureService.isRunning) {
+            val bitmap = service.captureBitmap()
+            if (bitmap != null) return bitmap
+        }
+
+        // Slow path: MediaProjection. Start the capture service if it isn't running yet.
+        if (!ScreenCaptureService.isRunning) {
+            val ok = try {
+                ensureCaptureService()
+            } catch (e: Exception) {
+                onLog(AgentLog.Error("Не удалось запустить захват экрана: ${e.message}"))
+                false
+            }
+            if (!ok) return null
+        }
+        return ScreenCaptureService.captureFrame()
     }
 
     private fun saveBitmapToPng(bitmap: Bitmap): String {

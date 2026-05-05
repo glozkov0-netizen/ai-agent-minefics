@@ -183,6 +183,12 @@ fun AppRoot(
     var tab by remember { mutableIntStateOf(0) }
     val context = LocalContext.current
 
+    // Auto-launch the system MediaProjection consent dialog as soon as the agent (or another
+    // viewmodel path) flips `pendingProjection`. Saves the user an extra tap.
+    LaunchedEffect(state.pendingProjection) {
+        if (state.pendingProjection) onRequestProjection()
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(title = { Text("AI Agent") })

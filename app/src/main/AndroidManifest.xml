@@ -63,6 +63,11 @@
             android:foregroundServiceType="mediaProjection" />
 
         <service
+            android:name=".service.ScreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <service
             android:name=".service.AudioCaptureService"
             android:exported="false"
             android:foregroundServiceType="microphone|mediaProjection" />

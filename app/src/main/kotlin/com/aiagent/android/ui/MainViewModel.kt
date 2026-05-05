@@ -18,6 +18,7 @@ import com.aiagent.android.llm.ChatMessage
 import com.aiagent.android.llm.LlmClient
 import com.aiagent.android.overlay.OverlayService
 import com.aiagent.android.service.AgentAccessibilityService
+import com.aiagent.android.service.ScreenCaptureService
 import com.aiagent.android.service.ScreenRecorderService
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -260,6 +261,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             askUser = { question -> waitForUserAnswer(question) },
             startScreenRecording = { startScreenRecording() },
             stopScreenRecording = { stopScreenRecording() },
+            ensureCaptureService = { ensureScreenCaptureService() },
         ) { entry -> appendAgentLog(entry) }
 
         // Clear the input field so the user knows the message was accepted.
@@ -390,6 +392,45 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         } else {
             "запись начата"
         }
+    }
+
+    /**
+     * Ensures a long-lived [ScreenCaptureService] is running so the agent can grab screenshots
+     * via MediaProjection (the universal fallback for devices where the Accessibility
+     * `takeScreenshot()` API is blocked by the OEM, e.g. Realme / Vivo / older Xiaomi).
+     */
+    private suspend fun ensureScreenCaptureService(): Boolean {
+        if (ScreenCaptureService.isRunning) return true
+        val ch = Channel<ProjectionGrant>(capacity = 1)
+        pendingProjectionChannel = ch
+        _state.update { it.copy(pendingProjection = true) }
+        appendLog(LogEntry.System("Запрашиваю разрешение на захват экрана. Подтвердите в системном диалоге."))
+        val grant = try {
+            ch.receive()
+        } catch (_: Throwable) {
+            return false
+        } finally {
+            pendingProjectionChannel = null
+            _state.update { it.copy(pendingProjection = false) }
+        }
+        if (grant.resultCode == 0 || grant.data == null) {
+            appendLog(LogEntry.System("Пользователь отказал в захвате экрана."))
+            return false
+        }
+        val app = getApplication<Application>()
+        val intent = Intent(app, ScreenCaptureService::class.java).apply {
+            action = ScreenCaptureService.ACTION_START
+            putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, grant.resultCode)
+            putExtra(ScreenCaptureService.EXTRA_DATA, grant.data)
+        }
+        if (Build.VERSION.SDK_INT >= 26) {
+            app.startForegroundService(intent)
+        } else {
+            app.startService(intent)
+        }
+        // Give the service a moment to spin up its VirtualDisplay.
+        kotlinx.coroutines.delay(700)
+        return ScreenCaptureService.isRunning
     }
 
     private fun stopScreenRecording(): String {
