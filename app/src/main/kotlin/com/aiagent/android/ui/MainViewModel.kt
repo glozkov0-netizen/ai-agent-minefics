@@ -94,9 +94,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     _state.update { it.copy(instruction = transcript) }
                     runAgent()
                 } else {
-                    // Running but no open question. Just log the user's input so they can
-                    // see it was received; the agent will pick it up on the next ask_user.
-                    appendLog(LogEntry.System("Голос (агент занят): $transcript"))
+                    // Running but no open question. Push into the agent's interrupt queue —
+                    // it will be drained at the start of the next step and injected as a
+                    // fresh user message so the controller sees it.
+                    Agent.userInterrupts.offer(transcript)
+                    appendLog(LogEntry.System("Голос (агент занят, дойдёт на следующем шаге): $transcript"))
                 }
             }
         }
@@ -594,6 +596,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             is AgentLog.AskUser -> LogEntry.AskUser(entry.question)
             is AgentLog.Done -> LogEntry.Done(entry.summary, entry.success)
             is AgentLog.Error -> LogEntry.Error(entry.message)
+            is AgentLog.System -> LogEntry.System(entry.message)
         }
         appendLog(log)
     }

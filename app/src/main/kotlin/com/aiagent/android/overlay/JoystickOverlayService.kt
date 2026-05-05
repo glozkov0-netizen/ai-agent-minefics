@@ -87,6 +87,16 @@ class JoystickOverlayService : Service() {
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
         val sizePx = (s.joystickRadius * 2 + dp(20)).coerceAtLeast(dp(80))
+        // Clamp the persisted centre into the visible screen so a stale Settings value (e.g.
+        // from a previous device with different resolution, or from a glitched drag) can't
+        // hide the joystick off-screen. We require at least 1/3 of the joystick to be visible.
+        val screenW = resources.displayMetrics.widthPixels
+        val screenH = resources.displayMetrics.heightPixels
+        val minMargin = sizePx / 3
+        val safeCx = s.joystickX.coerceIn(minMargin, screenW - minMargin)
+        val safeCy = s.joystickY.coerceIn(minMargin, screenH - minMargin)
+        if (safeCx != s.joystickX) s.joystickX = safeCx
+        if (safeCy != s.joystickY) s.joystickY = safeCy
         val params = WindowManager.LayoutParams(
             sizePx,
             sizePx,
@@ -95,8 +105,8 @@ class JoystickOverlayService : Service() {
             PixelFormat.TRANSLUCENT,
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = (s.joystickX - sizePx / 2).coerceAtLeast(0)
-            y = (s.joystickY - sizePx / 2).coerceAtLeast(0)
+            x = safeCx - sizePx / 2
+            y = safeCy - sizePx / 2
         }
         runCatching { windowManager?.addView(view, params) }
         view.windowParams = params
@@ -219,6 +229,12 @@ class JoystickOverlayService : Service() {
                         // Schedule a long-press timer. Even if the user holds completely still
                         // (no further ACTION_MOVE events), this runnable converts the active
                         // drag into a configuration drag after `longPressMs`.
+                        // IMPORTANT: capture event values NOW. By the time the runnable fires
+                        // 500 ms later, `event` is recycled by Android and reading
+                        // event.rawX / event.rawY returns garbage — which used to make the
+                        // window jump off-screen.
+                        val downRawX = event.rawX
+                        val downRawY = event.rawY
                         cancelPendingLongPress()
                         val r = Runnable {
                             if (configMode) return@Runnable
@@ -229,10 +245,11 @@ class JoystickOverlayService : Service() {
                                 thumbDy = 0f
                             }
                             configMode = true
-                            // Re-anchor at current touch so the next ACTION_MOVE delta starts
-                            // from "now" instead of the original DOWN — prevents window jump.
-                            anchorRawX = event.rawX
-                            anchorRawY = event.rawY
+                            // Re-anchor at the captured DOWN position. The next ACTION_MOVE
+                            // computes delta from here; without this the window snaps to
+                            // wherever the recycled event happened to be pointing.
+                            anchorRawX = downRawX
+                            anchorRawY = downRawY
                             anchorWindowX = windowParams?.x ?: 0
                             anchorWindowY = windowParams?.y ?: 0
                             invalidate()

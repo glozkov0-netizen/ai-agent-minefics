@@ -16,6 +16,7 @@ import com.aiagent.android.llm.ChatMessage
 import com.aiagent.android.llm.ChatRequest
 import com.aiagent.android.llm.LlmClient
 import com.aiagent.android.llm.LlmException
+import com.aiagent.android.llm.FunctionCall
 import com.aiagent.android.llm.ToolCall
 import com.aiagent.android.llm.textMessage
 import com.aiagent.android.llm.userImageMessage
@@ -124,6 +125,16 @@ class Agent(
         try {
             for (step in 1..settings.maxSteps) {
                 onLog(AgentLog.Thinking(step))
+                // Drain any pending voice/text interruptions the user pushed via the floating
+                // overlay while the agent was busy. Each becomes a fresh user message that the
+                // controller sees on this step.
+                while (true) {
+                    val interruption = userInterrupts.poll() ?: break
+                    if (interruption.isNotBlank()) {
+                        messages.add(textMessage(role = "user", text = interruption))
+                        onLog(AgentLog.System("Получено сообщение от пользователя: $interruption"))
+                    }
+                }
                 // Game-mode: get a fresh view of the screen before each model call.
                 // Two paths:
                 //  (a) Single-model: inject the raw image straight into the controller's
@@ -240,8 +251,35 @@ class Agent(
                 msg.contentText?.takeIf { it.isNotBlank() }?.let {
                     onLog(AgentLog.Assistant(it))
                 }
-                messages.add(msg)
-                val toolCalls = msg.toolCalls.orEmpty()
+                // Recovery: some text-only models (notably gpt-oss-120b) sometimes serialize
+                // the tool call as JSON inside the assistant content instead of using the
+                // proper `tool_calls` field. Detect that and synthesize a real ToolCall so the
+                // agent loop continues to behave correctly. Without this the user sees a wall
+                // of `АГЕНТ: {"ask_user_overlay": {...}}` text and nothing actually happens.
+                val rawToolCalls = msg.toolCalls.orEmpty()
+                val recoveredCall = if (rawToolCalls.isEmpty()) {
+                    msg.contentText?.let { recoverToolCallFromText(it) }
+                } else null
+                val finalMsg = if (recoveredCall != null) {
+                    onLog(AgentLog.System("Восстановил tool-call из текста: ${recoveredCall.function.name}"))
+                    // Replace the assistant message with one that has a proper tool_calls field
+                    // so subsequent tool messages (with matching tool_call_id) link correctly.
+                    msg.copy(content = null, toolCalls = listOf(recoveredCall))
+                } else msg
+                messages.add(finalMsg)
+                if (recoveredCall != null && rawToolCalls.isEmpty()) {
+                    // Also nudge the model to use the proper format next time.
+                    messages.add(
+                        textMessage(
+                            role = "system",
+                            text = "REMINDER: Use the structured `tool_calls` API field for all " +
+                                "tool invocations. Do NOT serialize tool calls as JSON inside the " +
+                                "`content` of an assistant message — they will not execute. Just " +
+                                "call the tool the normal way.",
+                        ),
+                    )
+                }
+                val toolCalls = if (recoveredCall != null) listOf(recoveredCall) else rawToolCalls
                 if (toolCalls.isEmpty()) {
                     // Two modes here:
                     //  - autoPauseOnIdle = true  → return; user resumes with «Продолжить».
@@ -957,6 +995,59 @@ class Agent(
         }
     }
 
+    /**
+     * Best-effort recovery for the case where a text-only model (e.g. gpt-oss-120b) decides
+     * to serialize a tool invocation as JSON in the assistant `content` field instead of
+     * using the proper `tool_calls` API. We accept several common shapes:
+     *
+     *   1. `{"toolName": {...args}}`             ← the most common form we see in the wild
+     *   2. `{"name": "toolName", "arguments": ...}` ← OpenAI's older function-call shape
+     *   3. `{"tool": "toolName", "args": {...}}` ← occasional variant
+     *
+     * Returns a synthetic [ToolCall] if exactly one known tool name is detected; null
+     * otherwise. Knowingly conservative — we only attempt parses that look like JSON, never
+     * try to coerce arbitrary natural-language text into a tool call.
+     */
+    private fun recoverToolCallFromText(raw: String): ToolCall? {
+        val trimmed = raw.trim()
+            .removePrefix("```json")
+            .removePrefix("```")
+            .removeSuffix("```")
+            .trim()
+        if (!trimmed.startsWith("{")) return null
+        val knownTools: Set<String> = com.aiagent.android.agent.Tools.toolList()
+            .map { it.function.name }
+            .toSet()
+        val parsed = runCatching { Json.parseToJsonElement(trimmed) }.getOrNull()
+            as? JsonObject ?: return null
+
+        // Shape #2: explicit name + arguments.
+        val explicitName = parsed["name"]?.jsonPrimitive?.contentOrNull
+            ?: parsed["tool"]?.jsonPrimitive?.contentOrNull
+        if (explicitName != null && explicitName in knownTools) {
+            val argsElem = parsed["arguments"] ?: parsed["args"] ?: JsonObject(emptyMap())
+            val argsString = if (argsElem is JsonPrimitive && argsElem.isString) {
+                argsElem.contentOrNull.orEmpty()
+            } else {
+                argsElem.toString()
+            }
+            return ToolCall(
+                id = "recovered_${System.nanoTime()}",
+                type = "function",
+                function = FunctionCall(name = explicitName, arguments = argsString),
+            )
+        }
+
+        // Shape #1: top-level key is the tool name.
+        val matchedName = parsed.keys.firstOrNull { it in knownTools } ?: return null
+        val args = parsed[matchedName] as? JsonObject ?: return null
+        return ToolCall(
+            id = "recovered_${System.nanoTime()}",
+            type = "function",
+            function = FunctionCall(name = matchedName, arguments = args.toString()),
+        )
+    }
+
     private fun extractTextFromMultimodal(content: JsonElement): String {
         if (content !is JsonArray) return ""
         return content.joinToString(" ") { part ->
@@ -1101,6 +1192,11 @@ class Agent(
 
     companion object {
         private const val TAG = "Agent"
+        /** Voice / text messages pushed by the user from the floating ⚙️ overlay while the
+         *  agent is mid-step. Drained at the start of each turn and injected as user messages
+         *  so the controller sees them and can react. Thread-safe queue. */
+        val userInterrupts: java.util.concurrent.ConcurrentLinkedQueue<String> =
+            java.util.concurrent.ConcurrentLinkedQueue()
         /** Vision-capable models on Groq cap inputs at 5 images/request; 3 keeps headroom for
          *  the model's own returned tool messages without hitting the limit. */
         private const val MAX_IMAGES_IN_HISTORY = 3
@@ -1180,6 +1276,7 @@ sealed class AgentLog {
     data class AskUser(val question: String) : AgentLog()
     data class Done(val summary: String, val success: Boolean) : AgentLog()
     data class Error(val message: String) : AgentLog()
+    data class System(val message: String) : AgentLog()
 }
 
 internal data class ToolResult(
