@@ -230,7 +230,7 @@ class Agent(
                     // When vision-mode is on AND the tool produced a screenshot, attach it as a
                     // user message so the model actually "sees" the screen. Vision-capable
                     // models (Llama-4 Scout/Maverick on Groq, GPT-4o on OpenAI) accept this format.
-                    if (settings.sendScreenshots && result.imageDataUrl != null) {
+                    if (visionEnabled() && result.imageDataUrl != null) {
                         messages.add(
                             userImageMessage(
                                 text = "Текущий скриншот (после инструмента ${call.function.name}):",
@@ -290,7 +290,7 @@ class Agent(
                 // Try to also grab a bitmap so a vision model can SEE the screen — Accessibility
                 // alone misses everything that's drawn into a SurfaceView (most games, video
                 // players, and OpenGL apps).
-                val bitmap = if (settings.sendScreenshots) throttleAndCapture(service) else null
+                val bitmap = if (visionEnabled()) throttleAndCapture(service) else null
                 val hint = if (state.nodes.isEmpty()) {
                     "\n[hint] Accessibility tree пуст — приложение скорее всего рендерит в SurfaceView " +
                         "(игра / видео / WebGL). Вызови read_screen_text для OCR или " +
@@ -316,7 +316,7 @@ class Agent(
                     ToolResult(
                         toolContent = "Foreground app: ${service.captureScreenState().packageName}\n--- OCR ---\n$text",
                         summary = "OCR: ${text.length} символов",
-                        imageDataUrl = if (settings.sendScreenshots) bitmapToDataUrl(bitmap) else null,
+                        imageDataUrl = if (visionEnabled()) bitmapToDataUrl(bitmap) else null,
                     )
                 }
             }
@@ -329,7 +329,7 @@ class Agent(
                     ToolResult(
                         toolContent = "Saved screenshot to $path",
                         summary = "сохранён скриншот: $path",
-                        imageDataUrl = if (settings.sendScreenshots) bitmapToDataUrl(bitmap) else null,
+                        imageDataUrl = if (visionEnabled()) bitmapToDataUrl(bitmap) else null,
                     )
                 }
             }
@@ -746,6 +746,35 @@ class Agent(
             id.startsWith("o4") || id.contains("/o4")
     }
 
+    /**
+     * True if the given model id is known to accept image inputs (multimodal). Includes Groq's
+     * llama-3.2-vision, llama-4 Scout/Maverick lineup, OpenAI gpt-4o / gpt-4-turbo / gpt-4-vision /
+     * gpt-5, Anthropic claude-3+, and Gemini.
+     */
+    private fun supportsVision(modelId: String): Boolean {
+        val id = modelId.lowercase()
+        return id.contains("vision") ||
+            id.contains("llama-4") ||
+            id.contains("llama4") ||
+            id.contains("scout") ||
+            id.contains("maverick") ||
+            id.contains("gpt-4o") ||
+            id.contains("gpt-4-turbo") ||
+            id.contains("gpt-4-vision") ||
+            id.contains("gpt-5") ||
+            id.contains("claude-3") ||
+            id.contains("claude-4") ||
+            id.contains("claude-sonnet") ||
+            id.contains("claude-opus") ||
+            id.contains("claude-haiku") ||
+            id.contains("gemini") ||
+            id.contains("pixtral")
+    }
+
+    /** True if the agent should attach screenshots to LLM messages this run. */
+    private fun visionEnabled(): Boolean =
+        settings.sendScreenshots || supportsVision(settings.model)
+
     /** True if the given screen-pixel point falls inside the persistent overlay STOP button.
      *  Used to refuse tap_at / swipe_at calls so the AI cannot click its own kill switch. */
     private fun isInsideStopButton(x: Int, y: Int): Boolean {
@@ -857,7 +886,7 @@ VIDEO RECORDING
 - start_screen_recording / stop_screen_recording → MP4 of the screen via MediaProjection. The first call pauses for the system consent dialog.
 
 DONE
-- done(summary, success) → report progress on the current sub-task. **This does NOT end the agent.**
+- done(summary) → report progress on the current sub-task. **This does NOT end the agent.**
   Only the user can stop the agent, by tapping the floating red "🛑 СТОП" button that the app
   renders over every screen. Do not try to tap that button — `tap_at` / `swipe_at` will refuse
   any coordinate that lands inside it.
@@ -870,10 +899,11 @@ Workflow rules:
 5. If the user asked you to read out chat or a system message that is rendered in a game / image, use `read_screen_text` to get the text first, then `speak` it.
 6. Keep `type_text` payloads under 1000 characters and avoid embedded newlines unless absolutely required.
 7. When file writes / deletions are destructive, confirm with `ask_user_overlay` first.
-8. When you finish a sub-task, call `done(summary, success)` to report it, then KEEP HELPING. The
+8. When you finish a sub-task, call `done(summary)` to report it, then KEEP HELPING. The
    user is still here. If there is nothing actionable, call `read_screen` to check on the game
    periodically, or `ask_user_overlay` to ask what they want next.
-9. Reply in the user's language (default Russian) for user-facing strings (`speak`, `ask_user`, `ask_user_overlay`, `done.summary`).
+9. **NEVER claim you can see the screen unless you actually called `read_screen` (or `take_screenshot`/`read_screen_text`) in THIS turn.** When the user asks "что ты видишь" / "what do you see", call `read_screen` first and describe ONLY what's in the result; do not invent content.
+10. Reply in the user's language (default Russian) for user-facing strings (`speak`, `ask_user`, `ask_user_overlay`, `done.summary`).
 """
     }
 }

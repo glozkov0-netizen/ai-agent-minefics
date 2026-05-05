@@ -480,13 +480,16 @@ object Tools {
         name = "done",
         description = "Signal that the user's task has been completed (or cannot be completed). " +
             "Provide a short natural-language summary of what was done or why it failed.",
+        // Keep this schema *loose* on purpose: smaller open models routinely emit
+        // `success="true"` (string) instead of `success=true` (boolean), which Groq's
+        // strict validator rejects with HTTP 400 'expected boolean, but got string'. We
+        // accept any type here and parse defensively in Agent.kt.
         parameters = obj {
             put("type", "object")
             putJsonObject("properties") {
                 putJsonObject("summary") { put("type", "string") }
-                putJsonObject("success") { put("type", "boolean") }
             }
-            put("required", arr("summary", "success"))
+            put("required", arr("summary"))
         },
     )
 
